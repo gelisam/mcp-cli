@@ -1,0 +1,25 @@
+cabal-version:      3.0
+name:               mcp-cli
+version:            0.1.0.0
+-- synopsis:
+-- description:
+license:            NONE
+author:             Samuel Gélineau
+maintainer:         samuel.gelineau@well.co
+-- copyright:
+build-type:         Simple
+-- extra-source-files:
+
+common warnings
+    ghc-options: -Wall
+
+executable mcp-cli
+    hs-source-dirs:   src
+    main-is:          mcp-cli.hs
+    other-modules:    Mcp
+    build-depends:    base >= 4.7 && < 5
+                    , aeson >= 1.0
+                    , bytestring >= 0.10
+                    , text >= 1.2
+                    , typed-process >= 0.2
+    default-language: Haskell2010
