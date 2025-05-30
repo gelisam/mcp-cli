@@ -2,6 +2,8 @@
 
 A Model Context Protocol (MCP) server that exposes shell commands as tools for AI assistants like GitHub Copilot.
 
+![Screenshot](screenshot.png)
+
 ## Why?
 
 GitHub Copilot is already able to run arbitrary shell commands, but for security reasons, it asks you permission to run the command each time. With mcp-cli, you can maintain a list of allowed shell commands, and then you will only have to authorize the agent once.
