@@ -8,11 +8,11 @@ main :: IO ()
 main = do
   args <- getArgs
   case args of
-    [shellCommand] -> do
+    [] -> do
+      putStrLn "Usage: mcp-cli \"shell command1\" [\"shell command2\" ...]"
+      putStrLn "Example: mcp-cli \"ls -l\" \"ps aux\" \"date\""
+      exitFailure
+    shellCommands -> do
       IO.hSetBuffering IO.stdout IO.LineBuffering
       IO.hSetBuffering IO.stderr IO.LineBuffering
-      Mcp.mcpServer $ T.pack shellCommand
-    _ -> do
-      putStrLn "Usage: mcp-cli \"shell command\""
-      putStrLn "Example: mcp-cli \"ls -l\""
-      exitFailure
+      Mcp.mcpServer $ map T.pack shellCommands

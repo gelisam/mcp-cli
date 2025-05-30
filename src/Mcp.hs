@@ -95,19 +95,19 @@ instance FromJSON CallToolParams where
     <*> o .:? "arguments"
 
 -- Main MCP server function
-mcpServer :: Text -> IO ()
-mcpServer shellCommand = do
+mcpServer :: [Text] -> IO ()
+mcpServer shellCommands = do
   TIO.hPutStrLn IO.stderr "Waiting for connection..."
   hFlush IO.stderr
-  serverLoop shellCommand False
+  serverLoop shellCommands False
 
-serverLoop :: Text -> Bool -> IO ()
-serverLoop shellCommand connected = do
+serverLoop :: [Text] -> Bool -> IO ()
+serverLoop shellCommands connected = do
   line <- TIO.getLine
   case decode $ L8.fromStrict $ Data.Text.Encoding.encodeUtf8 line of
     Nothing -> do
       TIO.hPutStrLn IO.stderr $ "Invalid JSON: " <> line
-      serverLoop shellCommand connected
+      serverLoop shellCommands connected
     Just req -> do
       let newConnected = if method req == "initialize" && not connected
                         then True
@@ -115,24 +115,24 @@ serverLoop shellCommand connected = do
       when (newConnected && not connected) $
         TIO.hPutStrLn IO.stderr "Connected to VS Code."
       
-      response <- handleRequest shellCommand req
+      response <- handleRequest shellCommands req
       L8.putStrLn $ encode response
       hFlush IO.stdout
-      serverLoop shellCommand newConnected
+      serverLoop shellCommands newConnected
 
 -- Handle incoming JSON-RPC requests
-handleRequest :: Text -> JsonRpcRequest -> IO JsonRpcResponse
-handleRequest shellCommand req = do
+handleRequest :: [Text] -> JsonRpcRequest -> IO JsonRpcResponse
+handleRequest shellCommands req = do
   let requestId = id req
   case method req of
     "initialize" -> return $ JsonRpcResponse "2.0" (Just $ handleInitialize $ params req) Nothing requestId
     "tools/list" -> do
-      tools <- handleListTools shellCommand
+      tools <- handleListTools shellCommands
       return $ JsonRpcResponse "2.0" (Just $ object ["tools" .= tools]) Nothing requestId
     "tools/call" -> do
       res <- case params req of
         Just p -> case fromJSON p of
-          Success callParams -> handleCallTool shellCommand callParams
+          Success callParams -> handleCallTool shellCommands callParams
           Error err -> return $ Left $ "Invalid parameters: " <> T.pack err
         Nothing -> return $ Left "Missing parameters"
       case res of
@@ -155,37 +155,44 @@ handleInitialize _ = object
     ]
   ]
 
-handleListTools :: Text -> IO [McpTool]
-handleListTools shellCommand = return
-  [ McpTool
-    { toolName = "execute_shell_command"
-    , toolDescription = "Execute the shell command: " <> shellCommand
+handleListTools :: [Text] -> IO [McpTool]
+handleListTools shellCommands = return $
+  map (\(i, cmd) -> McpTool
+    { toolName = "execute_command_" <> T.pack (show i)
+    , toolDescription = "Execute the shell command: " <> cmd
     , toolInputSchema = object
       [ "type" .= ("object" :: Text)
       , "properties" .= object []
       , "required" .= ([] :: [Text])
       ]
-    }
-  ]
+    }) (zip [1..] shellCommands)
 
-handleCallTool :: Text -> CallToolParams -> IO (Either Text Value)
-handleCallTool shellCommand callParams = do
-  if callToolName callParams == "execute_shell_command"
-    then do
-      TIO.hPutStrLn IO.stderr $ "> " <> shellCommand
-      res <- executeShellCommand shellCommand
-      case res of
-        Right (out, err, exitCode) -> return $ Right $ object
-          [ "content" .= 
-            [ object
-              [ "type" .= ("text" :: Text)
-              , "text" .= (out <> if T.null err then "" else "\nSTDERR:\n" <> err)
-              ]
-            ]
-          , "isError" .= (exitCode /= 0)
-          ]
-        Left e -> return $ Left e
-    else return $ Left $ "Unknown tool: " <> callToolName callParams
+handleCallTool :: [Text] -> CallToolParams -> IO (Either Text Value)
+handleCallTool shellCommands callParams = do
+  let toolName = callToolName callParams
+  case T.stripPrefix "execute_command_" toolName of
+    Just indexText -> 
+      case reads (T.unpack indexText) of
+        [(index, "")] -> 
+          if index >= 1 && index <= length shellCommands
+            then do
+              let command = shellCommands !! (index - 1)
+              TIO.hPutStrLn IO.stderr $ "> " <> command
+              res <- executeShellCommand command
+              case res of
+                Right (out, err, exitCode) -> return $ Right $ object
+                  [ "content" .= 
+                    [ object
+                      [ "type" .= ("text" :: Text)
+                      , "text" .= (out <> if T.null err then "" else "\nSTDERR:\n" <> err)
+                      ]
+                    ]
+                  , "isError" .= (exitCode /= 0)
+                  ]
+                Left e -> return $ Left e
+            else return $ Left $ "Invalid command index: " <> T.pack (show index)
+        _ -> return $ Left $ "Invalid tool name format: " <> toolName
+    Nothing -> return $ Left $ "Unknown tool: " <> toolName
 
 -- Execute shell command using typed-process
 executeShellCommand :: Text -> IO (Either Text (Text, Text, Int))
