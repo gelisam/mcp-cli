@@ -27,6 +27,7 @@ import System.Process.Typed
 data Command = Command
   { cmdCommand :: Text
   , cmdName :: Maybe Text
+  , cmdDescription :: Maybe Text
   }
   deriving (Generic, Show)
 
@@ -41,13 +42,14 @@ parseCommand = do
   objResult <- ABE.perhaps $ do
     cmd <- ABE.key "command" ABE.asText
     name <- ABE.keyMay "name" ABE.asText
-    pure $ Command cmd name
+    description <- ABE.keyMay "description" ABE.asText
+    pure $ Command cmd name description
   case objResult of
     Just cmd -> pure cmd
     Nothing -> do
       -- Try as string
       cmd <- ABE.asText
-      pure $ Command cmd Nothing
+      pure $ Command cmd Nothing Nothing
 
 commandConfigParser :: Parse Text CommandConfig
 commandConfigParser = do
@@ -209,7 +211,9 @@ handleListTools shellCommands = return $
     { toolName = case cmdName cmd of
         Just name -> name
         Nothing -> "execute_command_" <> T.pack (show i)
-    , toolDescription = "Execute the shell command: " <> cmdCommand cmd
+    , toolDescription = case cmdDescription cmd of
+        Just desc -> desc
+        Nothing -> "Execute the shell command: " <> cmdCommand cmd
     , toolInputSchema = object
       [ "type" .= ("object" :: Text)
       , "properties" .= object []
