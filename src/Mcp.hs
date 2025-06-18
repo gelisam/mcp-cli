@@ -3,9 +3,11 @@
 
 module Mcp where
 
+import Control.Applicative ((<|>))
 import Control.Exception (catch, SomeException)
 import Control.Monad (when)
 import Data.Aeson
+import Data.Aeson.Types (Parser)
 import qualified Data.ByteString.Lazy.Char8 as L8
 import qualified Data.ByteString.Lazy as L
 import Data.Text (Text)
@@ -20,12 +22,36 @@ import qualified System.IO as IO
 import System.Process.Typed
 
 -- Configuration data types
-data CommandConfig = CommandConfig
-  { commands :: [Text]
+data Command = Command
+  { cmdCommand :: Text
+  , cmdName :: Maybe Text
   }
   deriving (Generic, Show)
 
-instance FromJSON CommandConfig
+data CommandConfig = CommandConfig
+  { commands :: [Command]
+  }
+  deriving (Generic, Show)
+
+instance FromJSON Command where
+  parseJSON = withObject "Command" $ \o -> Command
+    <$> o .: "command"
+    <*> o .:? "name"
+
+instance FromJSON CommandConfig where
+  parseJSON = withObject "CommandConfig" $ \o -> do
+    cmds <- o .: "commands"
+    parsedCommands <- mapM parseCommand cmds
+    return $ CommandConfig parsedCommands
+    where
+      parseCommand :: Value -> Parser Command
+      parseCommand v =
+        -- Try parsing as an object first
+        (withObject "Command" (\o -> Command
+          <$> o .: "command"
+          <*> o .:? "name") v)
+        -- If that fails, try parsing as a simple string
+        <|> (withText "Command" (\cmd -> return $ Command cmd Nothing) v)
 
 -- JSON-RPC data types
 data JsonRpcRequest = JsonRpcRequest
@@ -104,13 +130,13 @@ instance FromJSON CallToolParams where
     <*> o .:? "arguments"
 
 -- Main MCP server function
-mcpServer :: [Text] -> IO ()
+mcpServer :: [Command] -> IO ()
 mcpServer shellCommands = do
   TIO.hPutStrLn IO.stderr "Waiting for connection..."
   hFlush IO.stderr
   serverLoop shellCommands False
 
-serverLoop :: [Text] -> Bool -> IO ()
+serverLoop :: [Command] -> Bool -> IO ()
 serverLoop shellCommands connected = do
   line <- TIO.getLine
   case decode $ L8.fromStrict $ Data.Text.Encoding.encodeUtf8 line of
@@ -130,7 +156,7 @@ serverLoop shellCommands connected = do
       serverLoop shellCommands newConnected
 
 -- Handle incoming JSON-RPC requests
-handleRequest :: [Text] -> JsonRpcRequest -> IO JsonRpcResponse
+handleRequest :: [Command] -> JsonRpcRequest -> IO JsonRpcResponse
 handleRequest shellCommands req = do
   let requestId = id req
   case method req of
@@ -164,11 +190,13 @@ handleInitialize _ = object
     ]
   ]
 
-handleListTools :: [Text] -> IO [McpTool]
+handleListTools :: [Command] -> IO [McpTool]
 handleListTools shellCommands = return $
   map (\(i, cmd) -> McpTool
-    { toolName = "execute_command_" <> T.pack (show i)
-    , toolDescription = "Execute the shell command: " <> cmd
+    { toolName = case cmdName cmd of
+        Just name -> name
+        Nothing -> "execute_command_" <> T.pack (show i)
+    , toolDescription = "Execute the shell command: " <> cmdCommand cmd
     , toolInputSchema = object
       [ "type" .= ("object" :: Text)
       , "properties" .= object []
@@ -176,32 +204,47 @@ handleListTools shellCommands = return $
       ]
     }) (zip [1..] shellCommands)
 
-handleCallTool :: [Text] -> CallToolParams -> IO (Either Text Value)
+handleCallTool :: [Command] -> CallToolParams -> IO (Either Text Value)
 handleCallTool shellCommands callParams = do
   let toolName = callToolName callParams
-  case T.stripPrefix "execute_command_" toolName of
-    Just indexText ->
-      case reads (T.unpack indexText) of
-        [(index, "")] ->
-          if index >= 1 && index <= length shellCommands
-            then do
-              let command = shellCommands !! (index - 1)
-              TIO.hPutStrLn IO.stderr $ "> " <> command
-              res <- executeShellCommand command
-              case res of
-                Right (out, err, exitCode) -> return $ Right $ object
-                  [ "content" .=
-                    [ object
-                      [ "type" .= ("text" :: Text)
-                      , "text" .= (out <> if T.null err then "" else "\nSTDERR:\n" <> err)
-                      ]
-                    ]
-                  , "isError" .= (exitCode /= 0)
-                  ]
-                Left e -> return $ Left e
-            else return $ Left $ "Invalid command index: " <> T.pack (show index)
-        _ -> return $ Left $ "Invalid tool name format: " <> toolName
-    Nothing -> return $ Left $ "Unknown tool: " <> toolName
+  -- Try to find command by custom name first
+  case findCommandByName toolName shellCommands of
+    Just cmd -> executeAndRespond (cmdCommand cmd)
+    Nothing ->
+      -- Fall back to the old execute_command_N format
+      case T.stripPrefix "execute_command_" toolName of
+        Just indexText ->
+          case reads (T.unpack indexText) of
+            [(index, "")] ->
+              if index >= 1 && index <= length shellCommands
+                then do
+                  let command = cmdCommand $ shellCommands !! (index - 1)
+                  executeAndRespond command
+                else return $ Left $ "Invalid command index: " <> T.pack (show index)
+            _ -> return $ Left $ "Invalid tool name format: " <> toolName
+        Nothing -> return $ Left $ "Unknown tool: " <> toolName
+  where
+    findCommandByName :: Text -> [Command] -> Maybe Command
+    findCommandByName name cmds =
+      case filter (\cmd -> cmdName cmd == Just name) cmds of
+        [cmd] -> Just cmd
+        _ -> Nothing
+
+    executeAndRespond :: Text -> IO (Either Text Value)
+    executeAndRespond command = do
+      TIO.hPutStrLn IO.stderr $ "> " <> command
+      res <- executeShellCommand command
+      case res of
+        Right (out, err, exitCode) -> return $ Right $ object
+          [ "content" .=
+            [ object
+              [ "type" .= ("text" :: Text)
+              , "text" .= (out <> if T.null err then "" else "\nSTDERR:\n" <> err)
+              ]
+            ]
+          , "isError" .= (exitCode /= 0)
+          ]
+        Left e -> return $ Left e
 
 -- Execute shell command using typed-process
 executeShellCommand :: Text -> IO (Either Text (Text, Text, Int))
@@ -231,12 +274,12 @@ loadConfigAndStartServer configPath = do
       mcpServer shellCommands
       return $ Right ()
   where
-    tryLoadConfig :: FilePath -> IO (Either Text [Text])
+    tryLoadConfig :: FilePath -> IO (Either Text [Command])
     tryLoadConfig path = do
       content <- L.readFile path
       case decode content of
         Nothing -> return $ Left $ "Invalid JSON in config file: " <> T.pack path
         Just config -> return $ Right $ commands config
 
-    handleFileException :: SomeException -> IO (Either Text [Text])
+    handleFileException :: SomeException -> IO (Either Text [Command])
     handleFileException e = return $ Left $ "Failed to read config file: " <> T.pack (show e)

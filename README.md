@@ -16,7 +16,7 @@ cd mcp-cli
 cabal install
 ```
 
-First, create a JSON configuration file with your allowed commands. For example, create `${workspaceFolder}/.json`:
+First, create a JSON configuration file with your allowed commands. For example, create `mcp-cli.json`:
 
 ```json
 {
@@ -115,4 +115,25 @@ The experiment ran for 12 seconds total, which exceeded the target of 10
 seconds. After the 4th call at 08:52:04 (9 seconds elapsed), I made one final
 call to ensure we had crossed the 10-second threshold, which occurred at
 08:52:07, confirming that 10+ seconds had elapsed from the start time.
+```
+
+### Advanced configuration
+
+By default, the AI assistant will see tools with non-descriptive names like "execute_command_2", so you have to mention "mcp-cli" in order to point the AI assistant in the right direction. It is possible to specify a custom name for the tool, so that you can instead mention the name of the tool.
+
+```json
+{
+  "commands": [
+    {
+      "name": "list-files",
+      "command": "ls -l"
+    },
+    "pwd",
+    "git status",
+    {
+      "name": "recent_commits",
+      "command": "git log --oneline -10"
+    }
+  ]
+}
 ```
