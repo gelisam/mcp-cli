@@ -7,6 +7,7 @@ import Control.Exception (catch, SomeException)
 import Control.Monad (when)
 import Data.Aeson
 import qualified Data.ByteString.Lazy.Char8 as L8
+import qualified Data.ByteString.Lazy as L
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding
@@ -17,6 +18,14 @@ import System.Exit (ExitCode (..))
 import System.IO (hFlush)
 import qualified System.IO as IO
 import System.Process.Typed
+
+-- Configuration data types
+data CommandConfig = CommandConfig
+  { commands :: [Text]
+  }
+  deriving (Generic, Show)
+
+instance FromJSON CommandConfig
 
 -- JSON-RPC data types
 data JsonRpcRequest = JsonRpcRequest
@@ -114,7 +123,7 @@ serverLoop shellCommands connected = do
                         else connected
       when (newConnected && not connected) $
         TIO.hPutStrLn IO.stderr "Connected to VS Code."
-      
+
       response <- handleRequest shellCommands req
       L8.putStrLn $ encode response
       hFlush IO.stdout
@@ -137,9 +146,9 @@ handleRequest shellCommands req = do
         Nothing -> return $ Left "Missing parameters"
       case res of
         Right content -> return $ JsonRpcResponse "2.0" (Just content) Nothing requestId
-        Left errMsg -> return $ JsonRpcResponse "2.0" Nothing 
+        Left errMsg -> return $ JsonRpcResponse "2.0" Nothing
           (Just $ JsonRpcError (-32602) errMsg Nothing) requestId
-    _ -> return $ JsonRpcResponse "2.0" Nothing 
+    _ -> return $ JsonRpcResponse "2.0" Nothing
       (Just $ JsonRpcError (-32601) "Method not found" Nothing) requestId
 
 -- MCP protocol method implementations
@@ -171,9 +180,9 @@ handleCallTool :: [Text] -> CallToolParams -> IO (Either Text Value)
 handleCallTool shellCommands callParams = do
   let toolName = callToolName callParams
   case T.stripPrefix "execute_command_" toolName of
-    Just indexText -> 
+    Just indexText ->
       case reads (T.unpack indexText) of
-        [(index, "")] -> 
+        [(index, "")] ->
           if index >= 1 && index <= length shellCommands
             then do
               let command = shellCommands !! (index - 1)
@@ -181,7 +190,7 @@ handleCallTool shellCommands callParams = do
               res <- executeShellCommand command
               case res of
                 Right (out, err, exitCode) -> return $ Right $ object
-                  [ "content" .= 
+                  [ "content" .=
                     [ object
                       [ "type" .= ("text" :: Text)
                       , "text" .= (out <> if T.null err then "" else "\nSTDERR:\n" <> err)
@@ -208,6 +217,26 @@ executeShellCommand cmd = do
             ExitSuccess -> 0
             ExitFailure n -> n
       return $ Right (T.pack $ L8.unpack out, T.pack $ L8.unpack err, exitCodeInt)
-    
+
     handleException :: SomeException -> IO (Either Text (Text, Text, Int))
     handleException e = return $ Left $ "Failed to execute command: " <> T.pack (show e)
+
+-- Load configuration from JSON file and start MCP server
+loadConfigAndStartServer :: FilePath -> IO (Either Text ())
+loadConfigAndStartServer configPath = do
+  result <- catch (tryLoadConfig configPath) handleFileException
+  case result of
+    Left err -> return $ Left err
+    Right shellCommands -> do
+      mcpServer shellCommands
+      return $ Right ()
+  where
+    tryLoadConfig :: FilePath -> IO (Either Text [Text])
+    tryLoadConfig path = do
+      content <- L.readFile path
+      case decode content of
+        Nothing -> return $ Left $ "Invalid JSON in config file: " <> T.pack path
+        Just config -> return $ Right $ commands config
+
+    handleFileException :: SomeException -> IO (Either Text [Text])
+    handleFileException e = return $ Left $ "Failed to read config file: " <> T.pack (show e)

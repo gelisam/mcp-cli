@@ -16,18 +16,30 @@ cd mcp-cli
 cabal install
 ```
 
-Then in Agent mode, click the Tools button, then "Add More Tools...", "Add MCP Server...", then "Command (stdio)...". Then type `mcp-cli "ls -l"` then replace the randomly-generated name with `mcp-cli`, then pick "Workspace Settings". You can now type `#mcp-cli` as part of a prompt to instruct the agent to use the tool.
+First, create a JSON configuration file with your allowed commands. For example, create `commands.json`:
+
+```json
+{
+  "commands": [
+    "ls -l",
+    "date",
+    "pwd"
+  ]
+}
+```
+
+Then in Agent mode, click the Tools button, then "Add More Tools...", "Add MCP Server...", then "Command (stdio)...". Then type `mcp-cli mcp-cli.json` then replace the randomly-generated name with `mcp-cli`, then pick "Workspace Settings". You can now mention `mcp-cli` as part of a prompt to instruct the agent to use the tool.
 
 You should now have a `.vscode/mcp.json` file which looks like this:
 
-```
+```json
 {
   "servers": {
     "mcp-cli": {
       "type": "stdio",
       "command": "mcp-cli",
       "args": [
-        "ls -l"
+        "mcp-cli.json"
       ]
     }
   }
@@ -36,22 +48,7 @@ You should now have a `.vscode/mcp.json` file which looks like this:
 
 ## Usage
 
-You can now modify the list of allowed commands (a "Start" button will appear in VS Code after you make the change so the changes can take effect):
-
-```
-{
-  "servers": {
-    "mcp-cli": {
-      "type": "stdio",
-      "command": "mcp-cli",
-      "args": [
-        "ls -l",
-        "date"
-      ]
-    }
-  }
-}
-```
+You can now modify the list of allowed commands in your JSON configuration file. For the changes to `mcp-cli.json` to take effect, open `.vscode/mcp.json` in VS Code and click the "restart" button which should appear inline.
 
 Here is a example session.
 
