@@ -48,7 +48,7 @@ You should now have a `.vscode/mcp.json` file which looks like this:
 
 ## Usage
 
-You can now modify the list of allowed commands in your JSON configuration file. For the changes to `mcp-cli.json` to take effect, open `.vscode/mcp.json` in VS Code and click the "restart" button which should appear inline.
+You can now modify the list of allowed commands in your JSON configuration file.
 
 Here is a example session.
 

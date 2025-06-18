@@ -131,19 +131,19 @@ instance FromJSON CallToolParams where
     <*> o .:? "arguments"
 
 -- Main MCP server function
-mcpServer :: [Command] -> IO ()
-mcpServer shellCommands = do
+mcpServer :: FilePath -> IO ()
+mcpServer configPath = do
   TIO.hPutStrLn IO.stderr "Waiting for connection..."
   hFlush IO.stderr
-  serverLoop shellCommands False
+  serverLoop configPath False
 
-serverLoop :: [Command] -> Bool -> IO ()
-serverLoop shellCommands connected = do
+serverLoop :: FilePath -> Bool -> IO ()
+serverLoop configPath connected = do
   line <- TIO.getLine
   case decode $ L8.fromStrict $ Data.Text.Encoding.encodeUtf8 line of
     Nothing -> do
       TIO.hPutStrLn IO.stderr $ "Invalid JSON: " <> line
-      serverLoop shellCommands connected
+      serverLoop configPath connected
     Just req -> do
       let newConnected = if method req == "initialize" && not connected
                         then True
@@ -151,30 +151,42 @@ serverLoop shellCommands connected = do
       when (newConnected && not connected) $
         TIO.hPutStrLn IO.stderr "Connected to VS Code."
 
-      response <- handleRequest shellCommands req
+      response <- handleRequest configPath req
       L8.putStrLn $ encode response
       hFlush IO.stdout
-      serverLoop shellCommands newConnected
+      serverLoop configPath newConnected
 
 -- Handle incoming JSON-RPC requests
-handleRequest :: [Command] -> JsonRpcRequest -> IO JsonRpcResponse
-handleRequest shellCommands req = do
+handleRequest :: FilePath -> JsonRpcRequest -> IO JsonRpcResponse
+handleRequest configPath req = do
   let requestId = id req
   case method req of
     "initialize" -> return $ JsonRpcResponse "2.0" (Just $ handleInitialize $ params req) Nothing requestId
     "tools/list" -> do
-      tools <- handleListTools shellCommands
-      return $ JsonRpcResponse "2.0" (Just $ object ["tools" .= tools]) Nothing requestId
+      -- Reload configuration file
+      configResult <- loadConfig configPath
+      case configResult of
+        Left err -> return $ JsonRpcResponse "2.0" Nothing
+          (Just $ JsonRpcError (-32603) ("Failed to reload config: " <> err) Nothing) requestId
+        Right shellCommands -> do
+          tools <- handleListTools shellCommands
+          return $ JsonRpcResponse "2.0" (Just $ object ["tools" .= tools]) Nothing requestId
     "tools/call" -> do
-      res <- case params req of
-        Just p -> case fromJSON p of
-          Success callParams -> handleCallTool shellCommands callParams
-          Error err -> return $ Left $ "Invalid parameters: " <> T.pack err
-        Nothing -> return $ Left "Missing parameters"
-      case res of
-        Right content -> return $ JsonRpcResponse "2.0" (Just content) Nothing requestId
-        Left errMsg -> return $ JsonRpcResponse "2.0" Nothing
-          (Just $ JsonRpcError (-32602) errMsg Nothing) requestId
+      -- Reload configuration file for tool calls too
+      configResult <- loadConfig configPath
+      case configResult of
+        Left err -> return $ JsonRpcResponse "2.0" Nothing
+          (Just $ JsonRpcError (-32603) ("Failed to reload config: " <> err) Nothing) requestId
+        Right shellCommands -> do
+          res <- case params req of
+            Just p -> case fromJSON p of
+              Success callParams -> handleCallTool shellCommands callParams
+              Error err -> return $ Left $ "Invalid parameters: " <> T.pack err
+            Nothing -> return $ Left "Missing parameters"
+          case res of
+            Right content -> return $ JsonRpcResponse "2.0" (Just content) Nothing requestId
+            Left errMsg -> return $ JsonRpcResponse "2.0" Nothing
+              (Just $ JsonRpcError (-32602) errMsg Nothing) requestId
     _ -> return $ JsonRpcResponse "2.0" Nothing
       (Just $ JsonRpcError (-32601) "Method not found" Nothing) requestId
 
@@ -265,15 +277,11 @@ executeShellCommand cmd = do
     handleException :: SomeException -> IO (Either Text (Text, Text, Int))
     handleException e = return $ Left $ "Failed to execute command: " <> T.pack (show e)
 
--- Load configuration from JSON file and start MCP server
-loadConfigAndStartServer :: FilePath -> IO (Either Text ())
-loadConfigAndStartServer configPath = do
+-- Load configuration from JSON file
+loadConfig :: FilePath -> IO (Either Text [Command])
+loadConfig configPath = do
   result <- catch (tryLoadConfig configPath) handleFileException
-  case result of
-    Left err -> return $ Left err
-    Right shellCommands -> do
-      mcpServer shellCommands
-      return $ Right ()
+  return result
   where
     tryLoadConfig :: FilePath -> IO (Either Text [Command])
     tryLoadConfig path = do
@@ -292,3 +300,14 @@ loadConfigAndStartServer configPath = do
 
     handleFileException :: SomeException -> IO (Either Text [Command])
     handleFileException e = return $ Left $ "Failed to read config file: " <> T.pack (show e)
+
+-- Load configuration from JSON file and start MCP server
+loadConfigAndStartServer :: FilePath -> IO (Either Text ())
+loadConfigAndStartServer configPath = do
+  -- Initial config load to validate the file exists and is valid
+  result <- loadConfig configPath
+  case result of
+    Left err -> return $ Left err
+    Right _ -> do
+      mcpServer configPath
+      return $ Right ()
