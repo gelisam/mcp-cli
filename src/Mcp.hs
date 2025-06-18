@@ -7,6 +7,8 @@ import Control.Applicative ((<|>))
 import Control.Exception (catch, SomeException)
 import Control.Monad (when)
 import Data.Aeson
+import Data.Aeson.BetterErrors (Parse)
+import qualified Data.Aeson.BetterErrors as ABE
 import Data.Aeson.Types (Parser)
 import qualified Data.ByteString.Lazy.Char8 as L8
 import qualified Data.ByteString.Lazy as L
@@ -33,25 +35,24 @@ data CommandConfig = CommandConfig
   }
   deriving (Generic, Show)
 
-instance FromJSON Command where
-  parseJSON = withObject "Command" $ \o -> Command
-    <$> o .: "command"
-    <*> o .:? "name"
+parseCommand :: Parse Text Command
+parseCommand = do
+  -- Try as object first
+  objResult <- ABE.perhaps $ do
+    cmd <- ABE.key "command" ABE.asText
+    name <- ABE.keyMay "name" ABE.asText
+    pure $ Command cmd name
+  case objResult of
+    Just cmd -> pure cmd
+    Nothing -> do
+      -- Try as string
+      cmd <- ABE.asText
+      pure $ Command cmd Nothing
 
-instance FromJSON CommandConfig where
-  parseJSON = withObject "CommandConfig" $ \o -> do
-    cmds <- o .: "commands"
-    parsedCommands <- mapM parseCommand cmds
-    return $ CommandConfig parsedCommands
-    where
-      parseCommand :: Value -> Parser Command
-      parseCommand v =
-        -- Try parsing as an object first
-        (withObject "Command" (\o -> Command
-          <$> o .: "command"
-          <*> o .:? "name") v)
-        -- If that fails, try parsing as a simple string
-        <|> (withText "Command" (\cmd -> return $ Command cmd Nothing) v)
+commandConfigParser :: Parse Text CommandConfig
+commandConfigParser = do
+  cmds <- ABE.key "commands" $ ABE.eachInArray parseCommand
+  pure $ CommandConfig cmds
 
 -- JSON-RPC data types
 data JsonRpcRequest = JsonRpcRequest
@@ -277,9 +278,17 @@ loadConfigAndStartServer configPath = do
     tryLoadConfig :: FilePath -> IO (Either Text [Command])
     tryLoadConfig path = do
       content <- L.readFile path
-      case decode content of
-        Nothing -> return $ Left $ "Invalid JSON in config file: " <> T.pack path
-        Just config -> return $ Right $ commands config
+      case ABE.parse commandConfigParser content of
+        Left parseErr -> return $ Left $ formatParseError path parseErr
+        Right config -> return $ Right $ commands config
+
+    formatParseError :: FilePath -> ABE.ParseError Text -> Text
+    formatParseError path parseErr =
+      case parseErr of
+        ABE.InvalidJSON jsonErr ->
+          "Invalid JSON syntax in config file " <> T.pack path <> ": " <> T.pack jsonErr
+        ABE.BadSchema _ _ ->
+          "Configuration schema error in " <> T.pack path <> ": " <> T.pack (show parseErr)
 
     handleFileException :: SomeException -> IO (Either Text [Command])
     handleFileException e = return $ Left $ "Failed to read config file: " <> T.pack (show e)

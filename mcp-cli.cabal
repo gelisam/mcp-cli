@@ -19,6 +19,7 @@ executable mcp-cli
     other-modules:    Mcp
     build-depends:    base >= 4.7 && < 5
                     , aeson >= 1.0
+                    , aeson-better-errors >= 0.9
                     , bytestring >= 0.10
                     , text >= 1.2
                     , typed-process >= 0.2
