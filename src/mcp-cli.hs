@@ -49,7 +49,7 @@ showHelp = do
   putStrLn "          \"type\": \"stdio\","
   putStrLn "          \"command\": \"mcp-cli\","
   putStrLn "          \"args\": ["
-  putStrLn "            \"${workspaceFolder}/.vscode/mcp-cli.json\""
+  putStrLn "            \"${workspaceFolder}/mcp-cli.json\""
   putStrLn "          ]"
   putStrLn "        }"
   putStrLn "      }"

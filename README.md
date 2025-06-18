@@ -16,7 +16,7 @@ cd mcp-cli
 cabal install
 ```
 
-First, create a JSON configuration file with your allowed commands. For example, create `commands.json`:
+First, create a JSON configuration file with your allowed commands. For example, create `${workspaceFolder}/.json`:
 
 ```json
 {
@@ -28,7 +28,7 @@ First, create a JSON configuration file with your allowed commands. For example,
 }
 ```
 
-Then in Agent mode, click the Tools button, then "Add More Tools...", "Add MCP Server...", then "Command (stdio)...". Then type `mcp-cli mcp-cli.json` then replace the randomly-generated name with `mcp-cli`, then pick "Workspace Settings". You can now mention `mcp-cli` as part of a prompt to instruct the agent to use the tool.
+Then in Agent mode, click the Tools button, then "Add More Tools...", "Add MCP Server...", then "Command (stdio)...". Then type `mcp-cli ${workspaceFolder}/mcp-cli.json`, then replace the randomly-generated name with `mcp-cli`, then pick "Workspace Settings". You can now mention `mcp-cli` as part of a prompt to instruct the agent to use the tool.
 
 You should now have a `.vscode/mcp.json` file which looks like this:
 
@@ -39,7 +39,7 @@ You should now have a `.vscode/mcp.json` file which looks like this:
       "type": "stdio",
       "command": "mcp-cli",
       "args": [
-        "mcp-cli.json"
+        "${workspaceFolder}/mcp-cli.json"
       ]
     }
   }
