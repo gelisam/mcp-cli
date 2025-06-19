@@ -38,18 +38,19 @@ data CommandConfig = CommandConfig
 
 parseCommand :: Parse Text Command
 parseCommand = do
-  -- Try as object first
-  objResult <- ABE.perhaps $ do
-    cmd <- ABE.key "command" ABE.asText
-    name <- ABE.keyMay "name" ABE.asText
-    description <- ABE.keyMay "description" ABE.asText
-    pure $ Command cmd name description
-  case objResult of
-    Just cmd -> pure cmd
-    Nothing -> do
-      -- Try as string
+  tp <- ABE.withValue $ \value -> do
+    pure $ ABE.jsonTypeOf value
+  case tp of
+    ABE.TyObject -> do
+      cmd <- ABE.key "command" ABE.asText
+      name <- ABE.keyMay "name" ABE.asText
+      description <- ABE.keyMay "description" ABE.asText
+      pure $ Command cmd name description
+    ABE.TyString -> do
       cmd <- ABE.asText
       pure $ Command cmd Nothing Nothing
+    _ -> do
+      ABE.throwCustomError ("Expected object or string, got: " <> T.pack (show tp))
 
 commandConfigParser :: Parse Text CommandConfig
 commandConfigParser = do
