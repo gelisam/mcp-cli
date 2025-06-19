@@ -21,6 +21,7 @@ executable mcp-cli
                     , aeson >= 1.0
                     , aeson-better-errors >= 0.9
                     , bytestring >= 0.10
+                    , containers >= 0.6
                     , filepath >= 1.4
                     , text >= 1.2
                     , typed-process >= 0.2

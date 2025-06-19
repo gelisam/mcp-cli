@@ -10,10 +10,12 @@ import Data.Aeson
 import Data.Aeson.BetterErrors (Parse)
 import qualified Data.Aeson.BetterErrors as ABE
 import qualified Data.Aeson.KeyMap as KM
-import Data.Aeson.Key (Key, fromText)
+import Data.Aeson.Key (Key, fromText, toText)
 import Data.Aeson.Types (Parser)
 import qualified Data.ByteString.Lazy.Char8 as L8
 import qualified Data.ByteString.Lazy as L
+import Data.Map (Map)
+import qualified Data.Map as Map
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Aeson.Types (Parser)
@@ -47,11 +49,13 @@ data Command = Command
   , cmdDescription :: Maybe Text
   , cmdWorkingDirectory :: Maybe Text
   , cmdArguments :: Maybe [Argument]
+  , cmdEnvVars :: Maybe (Map Text (Maybe Text))
   }
   deriving (Generic, Show)
 
 data CommandConfig = CommandConfig
   { commands :: [Command]
+  , envVars :: Maybe (Map Text (Maybe Text))
   }
   deriving (Generic, Show)
 
@@ -70,6 +74,19 @@ parseArgument = do
     _ -> do
       ABE.throwCustomError ("Expected object or string, got: " <> T.pack (show tp))
 
+parseEnvVars :: Parse Text (Map Text (Maybe Text))
+parseEnvVars = do
+  obj <- ABE.asObject
+  pure $ Map.fromList $ map parseEnvVar $ KM.toList obj
+  where
+    parseEnvVar :: (Key, Value) -> (Text, Maybe Text)
+    parseEnvVar (key, value) =
+      let keyText = toText key
+      in case value of
+        Null -> (keyText, Nothing)
+        String text -> (keyText, Just text)
+        _ -> (keyText, Just $ T.pack $ show value)
+
 parseCommand :: Parse Text Command
 parseCommand = do
   tp <- ABE.withValue $ \value -> do
@@ -81,17 +98,19 @@ parseCommand = do
       description <- ABE.keyMay "description" ABE.asText
       workingDir <- ABE.keyMay "workingDirectory" ABE.asText
       arguments <- ABE.keyMay "arguments" $ ABE.eachInArray parseArgument
-      pure $ Command cmd name description workingDir arguments
+      envVarsMap <- ABE.keyMay "envVars" parseEnvVars
+      pure $ Command cmd name description workingDir arguments envVarsMap
     ABE.TyString -> do
       cmd <- ABE.asText
-      pure $ Command cmd Nothing Nothing Nothing Nothing
+      pure $ Command cmd Nothing Nothing Nothing Nothing Nothing
     _ -> do
       ABE.throwCustomError ("Expected object or string, got: " <> T.pack (show tp))
 
 commandConfigParser :: Parse Text CommandConfig
 commandConfigParser = do
   cmds <- ABE.key "commands" $ ABE.eachInArray parseCommand
-  pure $ CommandConfig cmds
+  globalEnvVars <- ABE.keyMay "envVars" parseEnvVars
+  pure $ CommandConfig cmds globalEnvVars
 
 -- JSON-RPC data types
 data JsonRpcRequest = JsonRpcRequest
@@ -212,8 +231,8 @@ handleRequest configPath req = do
       case configResult of
         Left err -> return $ JsonRpcResponse "2.0" Nothing
           (Just $ JsonRpcError (-32603) ("Failed to reload config: " <> err) Nothing) requestId
-        Right shellCommands -> do
-          tools <- handleListTools shellCommands
+        Right config -> do
+          tools <- handleListTools (commands config)
           return $ JsonRpcResponse "2.0" (Just $ object ["tools" .= tools]) Nothing requestId
     "tools/call" -> do
       -- Reload configuration file for tool calls too
@@ -221,10 +240,10 @@ handleRequest configPath req = do
       case configResult of
         Left err -> return $ JsonRpcResponse "2.0" Nothing
           (Just $ JsonRpcError (-32603) ("Failed to reload config: " <> err) Nothing) requestId
-        Right shellCommands -> do
+        Right config -> do
           res <- case params req of
             Just p -> case fromJSON p of
-              Success callParams -> handleCallTool configPath shellCommands callParams
+              Success callParams -> handleCallTool configPath config callParams
               Error err -> return $ Left $ "Invalid parameters: " <> T.pack err
             Nothing -> return $ Left "Missing parameters"
           case res of
@@ -280,9 +299,10 @@ handleListTools shellCommands = return $
           ]
       )
 
-handleCallTool :: FilePath -> [Command] -> CallToolParams -> IO (Either Text Value)
-handleCallTool configPath shellCommands callParams = do
+handleCallTool :: FilePath -> CommandConfig -> CallToolParams -> IO (Either Text Value)
+handleCallTool configPath config callParams = do
   let toolName = callToolName callParams
+      shellCommands = commands config
   -- Try to find command by custom name first
   case findCommandByName toolName shellCommands of
     Just cmd -> executeAndRespond cmd
@@ -312,18 +332,24 @@ handleCallTool configPath shellCommands callParams = do
       TIO.hPutStrLn IO.stderr $ "> " <> command
 
       -- Extract environment variables from call arguments
-      envVars <- case callArguments callParams of
+      callArgEnvVars <- case callArguments callParams of
         Nothing -> return []
         Just args -> case fromJSON args of
           Success argsObj -> return $ extractEnvVars (cmdArguments cmd) argsObj
           Error _ -> return []
+
+      -- Merge environment variables: global < command-specific < call arguments
+      let globalEnvVars = maybe Map.empty Prelude.id $ envVars config
+          cmdSpecificEnvVars = maybe Map.empty Prelude.id $ cmdEnvVars cmd
+          callArgEnvMap = Map.fromList $ map (\(k, v) -> (k, Just v)) callArgEnvVars
+          mergedEnvVars = Map.union callArgEnvMap $ Map.union cmdSpecificEnvVars globalEnvVars
 
       -- Resolve working directory
       let workingDir = case cmdWorkingDirectory cmd of
             Nothing -> Nothing
             Just wd -> Just $ resolveWorkingDirectory configPath (T.unpack wd)
 
-      res <- executeShellCommand workingDir envVars command
+      res <- executeShellCommand workingDir mergedEnvVars command
       case res of
         Right (out, err, exitCode) -> return $ Right $ object
           [ "content" .=
@@ -355,13 +381,13 @@ handleCallTool configPath shellCommands callParams = do
         else takeDirectory configPath </> workingDir
 
 -- Execute shell command using typed-process
-executeShellCommand :: Maybe FilePath -> [(Text, Text)] -> Text -> IO (Either Text (Text, Text, Int))
-executeShellCommand maybeWorkingDir envVars cmd = do
-  res <- catch (tryExecute maybeWorkingDir envVars cmd) handleException
+executeShellCommand :: Maybe FilePath -> Map Text (Maybe Text) -> Text -> IO (Either Text (Text, Text, Int))
+executeShellCommand maybeWorkingDir envVarsMap cmd = do
+  res <- catch (tryExecute maybeWorkingDir envVarsMap cmd) handleException
   return res
   where
-    tryExecute :: Maybe FilePath -> [(Text, Text)] -> Text -> IO (Either Text (Text, Text, Int))
-    tryExecute mWorkingDir envs command = do
+    tryExecute :: Maybe FilePath -> Map Text (Maybe Text) -> Text -> IO (Either Text (Text, Text, Int))
+    tryExecute mWorkingDir envMap command = do
       let baseConfig = shell $ T.unpack command
 
       let configurePwd :: ProcessConfig stdin stdout stderr
@@ -373,10 +399,16 @@ executeShellCommand maybeWorkingDir envVars cmd = do
               -> setWorkingDir workingDir
 
       baseVars <- getEnvironment
-      let extraVars = [(T.unpack k, T.unpack v) | (k, v) <- envs]
+      -- Convert Map to environment variable list, handling unset variables
+      let envVarsList = Map.toList envMap
+          setVars = [(T.unpack k, T.unpack v) | (k, Just v) <- envVarsList]
+          unsetVars = [T.unpack k | (k, Nothing) <- envVarsList]
+          -- Remove unset variables from base environment
+          filteredBaseVars = filter (\(k, _) -> k `notElem` unsetVars) baseVars
+          allVars = setVars ++ filteredBaseVars
       let configureEnv :: ProcessConfig stdin stdout stderr
                        -> ProcessConfig stdin stdout stderr
-          configureEnv = setEnv (extraVars ++ baseVars)
+          configureEnv = setEnv allVars
 
       let processConfig = configureEnv . configurePwd $ baseConfig
       (exitCode, out, err) <- readProcess processConfig
@@ -389,17 +421,17 @@ executeShellCommand maybeWorkingDir envVars cmd = do
     handleException e = return $ Left $ "Failed to execute command: " <> T.pack (show e)
 
 -- Load configuration from JSON file
-loadConfig :: FilePath -> IO (Either Text [Command])
+loadConfig :: FilePath -> IO (Either Text CommandConfig)
 loadConfig configPath = do
   result <- catch (tryLoadConfig configPath) handleFileException
   return result
   where
-    tryLoadConfig :: FilePath -> IO (Either Text [Command])
+    tryLoadConfig :: FilePath -> IO (Either Text CommandConfig)
     tryLoadConfig path = do
       content <- L.readFile path
       case ABE.parse commandConfigParser content of
         Left parseErr -> return $ Left $ formatParseError path parseErr
-        Right config -> return $ Right $ commands config
+        Right config -> return $ Right config
 
     formatParseError :: FilePath -> ABE.ParseError Text -> Text
     formatParseError path parseErr =
@@ -409,7 +441,7 @@ loadConfig configPath = do
         ABE.BadSchema _ _ ->
           "Configuration schema error in " <> T.pack path <> ": " <> T.pack (show parseErr)
 
-    handleFileException :: SomeException -> IO (Either Text [Command])
+    handleFileException :: SomeException -> IO (Either Text CommandConfig)
     handleFileException e = return $ Left $ "Failed to read config file: " <> T.pack (show e)
 
 -- Load configuration from JSON file and start MCP server
