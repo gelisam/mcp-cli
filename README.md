@@ -122,7 +122,7 @@ call to ensure we had crossed the 10-second threshold, which occurred at
 Using this extended format, you can also specify
 * The name which the AI assistant will see. Defaults to `execute_command_1`.
 * A description explaining to the AI assistant what the tool does. Defaults to `Execute the shell command: pwd`.
-* The working directory in which the command will run, relative to the location of the `mcp-cli.json` file. Defaults to the folder in which VS Code started.
+* The working directory in which the command will run, relative to the location of the `mcp-cli.json` file. The tool-specific path is relative to the top-level path, if any. Defaults to the folder in which VS Code started.
 * Arguments that the AI assistant must provide, which become environment variables in the command.
 * Environment variables to be set. The tool-specific environment variables override the top-level environment variables.
 

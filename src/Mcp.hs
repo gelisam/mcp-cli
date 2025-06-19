@@ -56,6 +56,7 @@ data Command = Command
 data CommandConfig = CommandConfig
   { commands :: [Command]
   , envVars :: Maybe (Map Text (Maybe Text))
+  , workingDirectory :: Maybe Text
   }
   deriving (Generic, Show)
 
@@ -110,7 +111,8 @@ commandConfigParser :: Parse Text CommandConfig
 commandConfigParser = do
   cmds <- ABE.key "commands" $ ABE.eachInArray parseCommand
   globalEnvVars <- ABE.keyMay "envVars" parseEnvVars
-  pure $ CommandConfig cmds globalEnvVars
+  globalWorkingDir <- ABE.keyMay "workingDirectory" ABE.asText
+  pure $ CommandConfig cmds globalEnvVars globalWorkingDir
 
 -- JSON-RPC data types
 data JsonRpcRequest = JsonRpcRequest
@@ -346,8 +348,10 @@ handleCallTool configPath config callParams = do
 
       -- Resolve working directory
       let workingDir = case cmdWorkingDirectory cmd of
-            Nothing -> Nothing
-            Just wd -> Just $ resolveWorkingDirectory configPath (T.unpack wd)
+            Nothing -> case workingDirectory config of
+              Nothing -> Nothing
+              Just globalWd -> Just $ resolveWorkingDirectory configPath (T.unpack globalWd)
+            Just toolWd -> Just $ resolveToolWorkingDirectory configPath (workingDirectory config) (T.unpack toolWd)
 
       res <- executeShellCommand workingDir mergedEnvVars command
       case res of
@@ -379,6 +383,20 @@ handleCallTool configPath config callParams = do
       if isAbsolute workingDir
         then workingDir
         else takeDirectory configPath </> workingDir
+
+    -- Helper function to resolve tool working directory with optional global base
+    resolveToolWorkingDirectory :: FilePath -> Maybe Text -> FilePath -> FilePath
+    resolveToolWorkingDirectory configPath maybeGlobalWd toolWd =
+      case maybeGlobalWd of
+        Nothing ->
+          -- No global working directory, resolve tool working directory relative to config
+          resolveWorkingDirectory configPath toolWd
+        Just globalWd ->
+          -- Global working directory exists
+          let globalResolved = resolveWorkingDirectory configPath (T.unpack globalWd)
+          in if isAbsolute toolWd
+               then toolWd  -- Tool working directory is absolute, use as-is
+               else globalResolved </> toolWd  -- Tool working directory is relative to global
 
 -- Execute shell command using typed-process
 executeShellCommand :: Maybe FilePath -> Map Text (Maybe Text) -> Text -> IO (Either Text (Text, Text, Int))
