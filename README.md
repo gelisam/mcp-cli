@@ -123,21 +123,35 @@ Using this extended format, you can also specify
 * The name which the AI assistant will see. Defaults to `execute_command_1`.
 * A description explaining to the AI assistant what the tool does. Defaults to `Execute the shell command: pwd`.
 * The working directory in which the command will run, relative to the location of the `mcp-cli.json` file. Defaults to the folder in which VS Code started.
+* Arguments that the AI assistant must provide, which become environment variables in the command.
 
 ```json
 {
   "commands": [
+    "ls -l",
     {
       "name": "list-source-files",
       "workingDirectory": "src",
       "command": "ls -l"
     },
-    "pwd",
+    {
+      "name": "list-files-in",
+      "command": "ls -l \"$FOLDER\"",
+      "arguments": [
+        "FOLDER"
+      ]
+    },
     "git status",
     {
       "name": "recent_changes",
-      "description": "summarize the last 10 commits"
-      "command": "git log --oneline -10"
+      "description": "summarize the last few commits",
+      "command": "git log --oneline | head -n \"$N\"",
+      "arguments": [
+        {
+          "name": "N",
+          "description": "the number of commits to list"
+        }
+      ]
     }
   ]
 }

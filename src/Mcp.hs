@@ -9,9 +9,17 @@ import Control.Monad (when)
 import Data.Aeson
 import Data.Aeson.BetterErrors (Parse)
 import qualified Data.Aeson.BetterErrors as ABE
+import qualified Data.Aeson.KeyMap as KM
+import Data.Aeson.Key (Key, fromText)
 import Data.Aeson.Types (Parser)
 import qualified Data.ByteString.Lazy.Char8 as L8
 import qualified Data.ByteString.Lazy as L
+import Data.Maybe (mapMaybe)
+import Data.Text (Text)
+import Data.Aeson.Types (Parser)
+import qualified Data.ByteString.Lazy.Char8 as L8
+import qualified Data.ByteString.Lazy as L
+import Data.Aeson.Key (Key, fromText)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding
@@ -25,11 +33,18 @@ import qualified System.IO as IO
 import System.Process.Typed
 
 -- Configuration data types
+data Argument = Argument
+  { argName :: Text
+  , argDescription :: Maybe Text
+  }
+  deriving (Generic, Show)
+
 data Command = Command
   { cmdCommand :: Text
   , cmdName :: Maybe Text
   , cmdDescription :: Maybe Text
   , cmdWorkingDirectory :: Maybe Text
+  , cmdArguments :: Maybe [Argument]
   }
   deriving (Generic, Show)
 
@@ -37,6 +52,21 @@ data CommandConfig = CommandConfig
   { commands :: [Command]
   }
   deriving (Generic, Show)
+
+parseArgument :: Parse Text Argument
+parseArgument = do
+  tp <- ABE.withValue $ \value -> do
+    pure $ ABE.jsonTypeOf value
+  case tp of
+    ABE.TyObject -> do
+      name <- ABE.key "name" ABE.asText
+      description <- ABE.keyMay "description" ABE.asText
+      pure $ Argument name description
+    ABE.TyString -> do
+      name <- ABE.asText
+      pure $ Argument name Nothing
+    _ -> do
+      ABE.throwCustomError ("Expected object or string, got: " <> T.pack (show tp))
 
 parseCommand :: Parse Text Command
 parseCommand = do
@@ -48,10 +78,11 @@ parseCommand = do
       name <- ABE.keyMay "name" ABE.asText
       description <- ABE.keyMay "description" ABE.asText
       workingDir <- ABE.keyMay "workingDirectory" ABE.asText
-      pure $ Command cmd name description workingDir
+      arguments <- ABE.keyMay "arguments" $ ABE.eachInArray parseArgument
+      pure $ Command cmd name description workingDir arguments
     ABE.TyString -> do
       cmd <- ABE.asText
-      pure $ Command cmd Nothing Nothing Nothing
+      pure $ Command cmd Nothing Nothing Nothing Nothing
     _ -> do
       ABE.throwCustomError ("Expected object or string, got: " <> T.pack (show tp))
 
@@ -223,12 +254,29 @@ handleListTools shellCommands = return $
     , toolDescription = case cmdDescription cmd of
         Just desc -> desc
         Nothing -> "Execute the shell command: " <> cmdCommand cmd
-    , toolInputSchema = object
+    , toolInputSchema = generateInputSchema $ cmdArguments cmd
+    }) (zip [1..] shellCommands)
+  where
+    generateInputSchema :: Maybe [Argument] -> Value
+    generateInputSchema Nothing = object
       [ "type" .= ("object" :: Text)
       , "properties" .= object []
       , "required" .= ([] :: [Text])
       ]
-    }) (zip [1..] shellCommands)
+    generateInputSchema (Just args) = object
+      [ "type" .= ("object" :: Text)
+      , "properties" .= object (map argumentToProperty args)
+      , "required" .= map argName args
+      ]
+
+    argumentToProperty :: Argument -> (Key, Value)
+    argumentToProperty arg =
+      ( fromText $ argName arg
+      , object $ filter ((/= Null) . snd)
+          [ "type" .= ("string" :: Text)
+          , "description" .= argDescription arg
+          ]
+      )
 
 handleCallTool :: FilePath -> [Command] -> CallToolParams -> IO (Either Text Value)
 handleCallTool configPath shellCommands callParams = do
@@ -261,12 +309,19 @@ handleCallTool configPath shellCommands callParams = do
       let command = cmdCommand cmd
       TIO.hPutStrLn IO.stderr $ "> " <> command
 
+      -- Extract environment variables from call arguments
+      envVars <- case callArguments callParams of
+        Nothing -> return []
+        Just args -> case fromJSON args of
+          Success argsObj -> return $ extractEnvVars (cmdArguments cmd) argsObj
+          Error _ -> return []
+
       -- Resolve working directory
       let workingDir = case cmdWorkingDirectory cmd of
             Nothing -> Nothing
             Just wd -> Just $ resolveWorkingDirectory configPath (T.unpack wd)
 
-      res <- executeShellCommand workingDir command
+      res <- executeShellCommand workingDir envVars command
       case res of
         Right (out, err, exitCode) -> return $ Right $ object
           [ "content" .=
@@ -279,6 +334,17 @@ handleCallTool configPath shellCommands callParams = do
           ]
         Left e -> return $ Left e
 
+    -- Helper function to extract environment variables from call arguments
+    extractEnvVars :: Maybe [Argument] -> Value -> [(Text, Text)]
+    extractEnvVars Nothing _ = []
+    extractEnvVars (Just args) (Object obj) =
+      mapMaybe (\arg ->
+        case KM.lookup (fromText $ argName arg) obj of
+          Just (String val) -> Just (argName arg, val)
+          _ -> Nothing
+      ) args
+    extractEnvVars _ _ = []
+
     -- Helper function to resolve working directory paths
     resolveWorkingDirectory :: FilePath -> FilePath -> FilePath
     resolveWorkingDirectory configPath workingDir =
@@ -287,16 +353,21 @@ handleCallTool configPath shellCommands callParams = do
         else takeDirectory configPath </> workingDir
 
 -- Execute shell command using typed-process
-executeShellCommand :: Maybe FilePath -> Text -> IO (Either Text (Text, Text, Int))
-executeShellCommand maybeWorkingDir cmd = do
-  res <- catch (tryExecute maybeWorkingDir cmd) handleException
+executeShellCommand :: Maybe FilePath -> [(Text, Text)] -> Text -> IO (Either Text (Text, Text, Int))
+executeShellCommand maybeWorkingDir envVars cmd = do
+  res <- catch (tryExecute maybeWorkingDir envVars cmd) handleException
   return res
   where
-    tryExecute :: Maybe FilePath -> Text -> IO (Either Text (Text, Text, Int))
-    tryExecute mWorkingDir command = do
+    tryExecute :: Maybe FilePath -> [(Text, Text)] -> Text -> IO (Either Text (Text, Text, Int))
+    tryExecute mWorkingDir envs command = do
+      let baseConfig = shell $ T.unpack command
+      let configWithInheritedEnv = setEnvInherit baseConfig
+      let configWithEnv = foldl (\config (key, val) ->
+                                    setEnv [(T.unpack key, T.unpack val)] config)
+                                  configWithInheritedEnv envs
       let processConfig = case mWorkingDir of
-            Nothing -> shell $ T.unpack command
-            Just workingDir -> setWorkingDir workingDir $ shell $ T.unpack command
+            Nothing -> configWithEnv
+            Just workingDir -> setWorkingDir workingDir configWithEnv
       (exitCode, out, err) <- readProcess processConfig
       let exitCodeInt = case exitCode of
             ExitSuccess -> 0
