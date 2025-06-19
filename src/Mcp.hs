@@ -25,12 +25,14 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding
 import qualified Data.Text.IO as TIO
 import GHC.Generics (Generic)
+import qualified Prelude (id)
 import Prelude hiding (id)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, isAbsolute, (</>))
 import System.IO (hFlush, hIsEOF)
 import qualified System.IO as IO
 import System.Process.Typed
+import System.Environment (getEnvironment)
 
 -- Configuration data types
 data Argument = Argument
@@ -361,13 +363,22 @@ executeShellCommand maybeWorkingDir envVars cmd = do
     tryExecute :: Maybe FilePath -> [(Text, Text)] -> Text -> IO (Either Text (Text, Text, Int))
     tryExecute mWorkingDir envs command = do
       let baseConfig = shell $ T.unpack command
-      let configWithInheritedEnv = setEnvInherit baseConfig
-      let configWithEnv = foldl (\config (key, val) ->
-                                    setEnv [(T.unpack key, T.unpack val)] config)
-                                  configWithInheritedEnv envs
-      let processConfig = case mWorkingDir of
-            Nothing -> configWithEnv
-            Just workingDir -> setWorkingDir workingDir configWithEnv
+
+      let configurePwd :: ProcessConfig stdin stdout stderr
+                       -> ProcessConfig stdin stdout stderr
+          configurePwd = case mWorkingDir of
+            Nothing
+              -> Prelude.id
+            Just workingDir
+              -> setWorkingDir workingDir
+
+      baseVars <- getEnvironment
+      let extraVars = [(T.unpack k, T.unpack v) | (k, v) <- envs]
+      let configureEnv :: ProcessConfig stdin stdout stderr
+                       -> ProcessConfig stdin stdout stderr
+          configureEnv = setEnv (extraVars ++ baseVars)
+
+      let processConfig = configureEnv . configurePwd $ baseConfig
       (exitCode, out, err) <- readProcess processConfig
       let exitCodeInt = case exitCode of
             ExitSuccess -> 0
