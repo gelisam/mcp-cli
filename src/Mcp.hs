@@ -19,6 +19,7 @@ import qualified Data.Text.IO as TIO
 import GHC.Generics (Generic)
 import Prelude hiding (id)
 import System.Exit (ExitCode (..))
+import System.FilePath (takeDirectory, isAbsolute, (</>))
 import System.IO (hFlush, hIsEOF)
 import qualified System.IO as IO
 import System.Process.Typed
@@ -28,6 +29,7 @@ data Command = Command
   { cmdCommand :: Text
   , cmdName :: Maybe Text
   , cmdDescription :: Maybe Text
+  , cmdWorkingDirectory :: Maybe Text
   }
   deriving (Generic, Show)
 
@@ -45,10 +47,11 @@ parseCommand = do
       cmd <- ABE.key "command" ABE.asText
       name <- ABE.keyMay "name" ABE.asText
       description <- ABE.keyMay "description" ABE.asText
-      pure $ Command cmd name description
+      workingDir <- ABE.keyMay "workingDirectory" ABE.asText
+      pure $ Command cmd name description workingDir
     ABE.TyString -> do
       cmd <- ABE.asText
-      pure $ Command cmd Nothing Nothing
+      pure $ Command cmd Nothing Nothing Nothing
     _ -> do
       ABE.throwCustomError ("Expected object or string, got: " <> T.pack (show tp))
 
@@ -188,7 +191,7 @@ handleRequest configPath req = do
         Right shellCommands -> do
           res <- case params req of
             Just p -> case fromJSON p of
-              Success callParams -> handleCallTool shellCommands callParams
+              Success callParams -> handleCallTool configPath shellCommands callParams
               Error err -> return $ Left $ "Invalid parameters: " <> T.pack err
             Nothing -> return $ Left "Missing parameters"
           case res of
@@ -227,12 +230,12 @@ handleListTools shellCommands = return $
       ]
     }) (zip [1..] shellCommands)
 
-handleCallTool :: [Command] -> CallToolParams -> IO (Either Text Value)
-handleCallTool shellCommands callParams = do
+handleCallTool :: FilePath -> [Command] -> CallToolParams -> IO (Either Text Value)
+handleCallTool configPath shellCommands callParams = do
   let toolName = callToolName callParams
   -- Try to find command by custom name first
   case findCommandByName toolName shellCommands of
-    Just cmd -> executeAndRespond (cmdCommand cmd)
+    Just cmd -> executeAndRespond cmd
     Nothing ->
       -- Fall back to the old execute_command_N format
       case T.stripPrefix "execute_command_" toolName of
@@ -241,8 +244,8 @@ handleCallTool shellCommands callParams = do
             [(index, "")] ->
               if index >= 1 && index <= length shellCommands
                 then do
-                  let command = cmdCommand $ shellCommands !! (index - 1)
-                  executeAndRespond command
+                  let cmd = shellCommands !! (index - 1)
+                  executeAndRespond cmd
                 else return $ Left $ "Invalid command index: " <> T.pack (show index)
             _ -> return $ Left $ "Invalid tool name format: " <> toolName
         Nothing -> return $ Left $ "Unknown tool: " <> toolName
@@ -253,10 +256,17 @@ handleCallTool shellCommands callParams = do
         [cmd] -> Just cmd
         _ -> Nothing
 
-    executeAndRespond :: Text -> IO (Either Text Value)
-    executeAndRespond command = do
+    executeAndRespond :: Command -> IO (Either Text Value)
+    executeAndRespond cmd = do
+      let command = cmdCommand cmd
       TIO.hPutStrLn IO.stderr $ "> " <> command
-      res <- executeShellCommand command
+
+      -- Resolve working directory
+      let workingDir = case cmdWorkingDirectory cmd of
+            Nothing -> Nothing
+            Just wd -> Just $ resolveWorkingDirectory configPath (T.unpack wd)
+
+      res <- executeShellCommand workingDir command
       case res of
         Right (out, err, exitCode) -> return $ Right $ object
           [ "content" .=
@@ -269,15 +279,24 @@ handleCallTool shellCommands callParams = do
           ]
         Left e -> return $ Left e
 
+    -- Helper function to resolve working directory paths
+    resolveWorkingDirectory :: FilePath -> FilePath -> FilePath
+    resolveWorkingDirectory configPath workingDir =
+      if isAbsolute workingDir
+        then workingDir
+        else takeDirectory configPath </> workingDir
+
 -- Execute shell command using typed-process
-executeShellCommand :: Text -> IO (Either Text (Text, Text, Int))
-executeShellCommand cmd = do
-  res <- catch (tryExecute cmd) handleException
+executeShellCommand :: Maybe FilePath -> Text -> IO (Either Text (Text, Text, Int))
+executeShellCommand maybeWorkingDir cmd = do
+  res <- catch (tryExecute maybeWorkingDir cmd) handleException
   return res
   where
-    tryExecute :: Text -> IO (Either Text (Text, Text, Int))
-    tryExecute command = do
-      let processConfig = shell $ T.unpack command
+    tryExecute :: Maybe FilePath -> Text -> IO (Either Text (Text, Text, Int))
+    tryExecute mWorkingDir command = do
+      let processConfig = case mWorkingDir of
+            Nothing -> shell $ T.unpack command
+            Just workingDir -> setWorkingDir workingDir $ shell $ T.unpack command
       (exitCode, out, err) <- readProcess processConfig
       let exitCodeInt = case exitCode of
             ExitSuccess -> 0

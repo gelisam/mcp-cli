@@ -119,19 +119,24 @@ call to ensure we had crossed the 10-second threshold, which occurred at
 
 ### Advanced configuration
 
-By default, the AI assistant will see tools with non-descriptive names like "execute_command_2", so you have to mention "mcp-cli" in order to point the AI assistant in the right direction. It is possible to specify a custom name for the tool, so that you can instead mention the name of the tool.
+Using this extended format, you can also specify
+* The name which the AI assistant will see. Defaults to `execute_command_1`.
+* A description explaining to the AI assistant what the tool does. Defaults to `Execute the shell command: pwd`.
+* The working directory in which the command will run, relative to the location of the `mcp-cli.json` file. Defaults to the folder in which VS Code started.
 
 ```json
 {
   "commands": [
     {
-      "name": "list-files",
+      "name": "list-source-files",
+      "workingDirectory": "src",
       "command": "ls -l"
     },
     "pwd",
     "git status",
     {
-      "name": "recent_commits",
+      "name": "recent_changes",
+      "description": "summarize the last 10 commits"
       "command": "git log --oneline -10"
     }
   ]
