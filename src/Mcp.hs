@@ -19,7 +19,7 @@ import qualified Data.Text.IO as TIO
 import GHC.Generics (Generic)
 import Prelude hiding (id)
 import System.Exit (ExitCode (..))
-import System.IO (hFlush)
+import System.IO (hFlush, hIsEOF)
 import qualified System.IO as IO
 import System.Process.Typed
 
@@ -142,22 +142,27 @@ mcpServer configPath = do
 
 serverLoop :: FilePath -> Bool -> IO ()
 serverLoop configPath connected = do
-  line <- TIO.getLine
-  case decode $ L8.fromStrict $ Data.Text.Encoding.encodeUtf8 line of
-    Nothing -> do
-      TIO.hPutStrLn IO.stderr $ "Invalid JSON: " <> line
-      serverLoop configPath connected
-    Just req -> do
-      let newConnected = if method req == "initialize" && not connected
-                        then True
-                        else connected
-      when (newConnected && not connected) $
-        TIO.hPutStrLn IO.stderr "Connected to VS Code."
+  eof <- hIsEOF IO.stdin
+  if eof
+    then do
+      return ()
+    else do
+      line <- TIO.getLine
+      case decode $ L8.fromStrict $ Data.Text.Encoding.encodeUtf8 line of
+        Nothing -> do
+          TIO.hPutStrLn IO.stderr $ "Invalid JSON: " <> line
+          serverLoop configPath connected
+        Just req -> do
+          let newConnected = if method req == "initialize" && not connected
+                            then True
+                            else connected
+          when (newConnected && not connected) $
+            TIO.hPutStrLn IO.stderr "Connected to VS Code."
 
-      response <- handleRequest configPath req
-      L8.putStrLn $ encode response
-      hFlush IO.stdout
-      serverLoop configPath newConnected
+          response <- handleRequest configPath req
+          L8.putStrLn $ encode response
+          hFlush IO.stdout
+          serverLoop configPath newConnected
 
 -- Handle incoming JSON-RPC requests
 handleRequest :: FilePath -> JsonRpcRequest -> IO JsonRpcResponse
