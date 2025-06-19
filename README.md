@@ -6,7 +6,9 @@ A Model Context Protocol (MCP) server that exposes shell commands as tools for A
 
 ## Why?
 
-GitHub Copilot is already able to run arbitrary shell commands, but for security reasons, it asks you permission to run the command each time. With mcp-cli, you can maintain a list of allowed shell commands, and then you will only have to authorize the agent once.
+GitHub Copilot is already able to run arbitrary shell commands, but with mcp-cli, you can explain exactly which shell commands it needs to run in order to e.g. build your code, run the tests, or exactly which idiosyncratic incantation is needed in order to connect to your database.
+
+Also, for security reasons, GitHub Copilot asks you permission to run each shell command. With mcp-cli, you can maintain a list of allowed shell commands, and then you will only have to authorize each tool once.
 
 ## Installation
 
