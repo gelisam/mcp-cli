@@ -12,20 +12,17 @@ import qualified Data.Aeson.BetterErrors as ABE
 import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Key (Key, fromText, toText)
 import Data.Aeson.Types (Parser)
-import qualified Data.ByteString.Lazy.Char8 as L8
-import qualified Data.ByteString.Lazy as L
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Maybe (mapMaybe)
-import Data.Text (Text)
-import Data.Aeson.Types (Parser)
-import qualified Data.ByteString.Lazy.Char8 as L8
-import qualified Data.ByteString.Lazy as L
+import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Aeson.Key (Key, fromText)
 import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Data.Text.Encoding
-import qualified Data.Text.IO as TIO
+import qualified Data.Text.Encoding as Text
+import qualified Data.Text.Lazy as LazyText
+import qualified Data.Text.Lazy.Encoding as LazyText
+import qualified Data.Text.IO as Text
 import GHC.Generics (Generic)
 import qualified Prelude (id)
 import Prelude hiding (id)
@@ -193,7 +190,7 @@ instance FromJSON CallToolParams where
 -- Main MCP server function
 mcpServer :: FilePath -> IO ()
 mcpServer configPath = do
-  TIO.hPutStrLn IO.stderr "Waiting for connection..."
+  Text.hPutStrLn IO.stderr "Waiting for connection..."
   hFlush IO.stderr
   serverLoop configPath False
 
@@ -204,20 +201,21 @@ serverLoop configPath connected = do
     then do
       return ()
     else do
-      line <- TIO.getLine
-      case decode $ L8.fromStrict $ Data.Text.Encoding.encodeUtf8 line of
+      line <- Text.getLine
+      case decode $ LazyByteString.fromStrict $ Text.encodeUtf8 line of
         Nothing -> do
-          TIO.hPutStrLn IO.stderr $ "Invalid JSON: " <> line
+          Text.hPutStrLn IO.stderr $ "Invalid JSON: " <> line
           serverLoop configPath connected
         Just req -> do
           let newConnected = if method req == "initialize" && not connected
                             then True
                             else connected
           when (newConnected && not connected) $
-            TIO.hPutStrLn IO.stderr "Connected to VS Code."
+            Text.hPutStrLn IO.stderr "Connected to VS Code."
 
           response <- handleRequest configPath req
-          L8.putStrLn $ encode response
+          LazyByteString.putStr $ encode response
+          Text.putStrLn ""
           hFlush IO.stdout
           serverLoop configPath newConnected
 
@@ -331,7 +329,7 @@ handleCallTool configPath config callParams = do
     executeAndRespond :: Command -> IO (Either Text Value)
     executeAndRespond cmd = do
       let command = cmdCommand cmd
-      TIO.hPutStrLn IO.stderr $ "> " <> command
+      Text.hPutStrLn IO.stderr $ "> " <> command
 
       -- Extract environment variables from call arguments
       callArgEnvVars <- case callArguments callParams of
@@ -433,7 +431,9 @@ executeShellCommand maybeWorkingDir envVarsMap cmd = do
       let exitCodeInt = case exitCode of
             ExitSuccess -> 0
             ExitFailure n -> n
-      return $ Right (T.pack $ L8.unpack out, T.pack $ L8.unpack err, exitCodeInt)
+      let outText = LazyText.decodeUtf8 out
+          errText = LazyText.decodeUtf8 err
+      return $ Right (LazyText.toStrict outText, LazyText.toStrict errText, exitCodeInt)
 
     handleException :: SomeException -> IO (Either Text (Text, Text, Int))
     handleException e = return $ Left $ "Failed to execute command: " <> T.pack (show e)
@@ -446,7 +446,7 @@ loadConfig configPath = do
   where
     tryLoadConfig :: FilePath -> IO (Either Text CommandConfig)
     tryLoadConfig path = do
-      content <- L.readFile path
+      content <- LazyByteString.readFile path
       case ABE.parse commandConfigParser content of
         Left parseErr -> return $ Left $ formatParseError path parseErr
         Right config -> return $ Right config
