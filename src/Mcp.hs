@@ -8,30 +8,30 @@ import Control.Exception (catch, SomeException)
 import Control.Monad (when)
 import Data.Aeson
 import Data.Aeson.BetterErrors (Parse)
-import qualified Data.Aeson.BetterErrors as ABE
-import qualified Data.Aeson.KeyMap as KM
+import Data.Aeson.Key (Key, fromText)
 import Data.Aeson.Key (Key, fromText, toText)
 import Data.Aeson.Types (Parser)
 import Data.Map (Map)
-import qualified Data.Map as Map
 import Data.Maybe (mapMaybe)
-import qualified Data.ByteString.Lazy as LazyByteString
-import Data.Aeson.Key (Key, fromText)
 import Data.Text (Text)
-import qualified Data.Text as T
-import qualified Data.Text.Encoding as Text
-import qualified Data.Text.Lazy as LazyText
-import qualified Data.Text.Lazy.Encoding as LazyText
-import qualified Data.Text.IO as Text
 import GHC.Generics (Generic)
-import qualified Prelude (id)
 import Prelude hiding (id)
+import System.Environment (getEnvironment)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, isAbsolute, (</>))
 import System.IO (hFlush, hIsEOF)
-import qualified System.IO as IO
 import System.Process.Typed
-import System.Environment (getEnvironment)
+import qualified Data.Aeson.BetterErrors as ABE
+import qualified Data.Aeson.KeyMap as KM
+import qualified Data.ByteString.Lazy as LazyByteString
+import qualified Data.Map as Map
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as Text
+import qualified Data.Text.IO as Text
+import qualified Data.Text.Lazy as LazyText
+import qualified Data.Text.Lazy.Encoding as LazyText
+import qualified Prelude (id)
+import qualified System.IO as IO
 
 -- Configuration data types
 data Argument = Argument
