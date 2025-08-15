@@ -32,6 +32,8 @@ import qualified Data.Text.Lazy as LazyText
 import qualified Data.Text.Lazy.Encoding as LazyText
 import qualified Prelude (id)
 import qualified System.IO as IO
+import qualified Data.Aeson as Aeson
+import Text.Printf (printf)
 
 -- Configuration data types
 data Argument = Argument
@@ -214,7 +216,7 @@ serverLoop configPath connected = do
             Text.hPutStrLn IO.stderr "Connected to VS Code."
 
           response <- handleRequest configPath req
-          LazyByteString.putStr $ encode response
+          LazyByteString.putStr $ encodeWithUnicodeEscapes response
           Text.putStrLn ""
           hFlush IO.stdout
           serverLoop configPath newConnected
@@ -472,3 +474,15 @@ loadConfigAndStartServer configPath = do
     Right _ -> do
       mcpServer configPath
       return $ Right ()
+
+-- Custom JSON encoder that forces Unicode escapes for non-ASCII characters
+encodeWithUnicodeEscapes :: ToJSON a => a -> LazyByteString.ByteString
+encodeWithUnicodeEscapes value =
+  let jsonText = LazyText.decodeUtf8 $ encode value
+      escapedText = LazyText.concatMap escapeChar jsonText
+  in LazyText.encodeUtf8 escapedText
+  where
+    escapeChar :: Char -> LazyText.Text
+    escapeChar c
+      | c >= '\x80' = LazyText.pack $ "\\u" ++ printf "%04x" (fromEnum c)
+      | otherwise = LazyText.singleton c
