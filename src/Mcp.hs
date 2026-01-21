@@ -263,7 +263,7 @@ handleInitialize _ = object
     [ "tools" .= object []
     ]
   , "serverInfo" .= object
-    [ "name" .= ("shell-command-mcp" :: Text)
+    [ "name" .= ("mcp-cli" :: Text)
     , "version" .= ("1.0.0" :: Text)
     ]
   ]
