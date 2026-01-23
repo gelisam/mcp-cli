@@ -5,7 +5,7 @@ module Mcp where
 
 import Control.Applicative ((<|>))
 import Control.Concurrent (threadDelay)
-import Control.Exception (catch, SomeException)
+import Control.Exception (catch, finally, SomeException)
 import Control.Monad (when)
 import Data.Aeson
 import Data.IORef
@@ -210,7 +210,10 @@ mcpServer configPath = do
   Text.hPutStrLn IO.stderr "Waiting for connection..."
   hFlush IO.stderr
   replsRef <- newIORef Map.empty
-  serverLoop configPath False replsRef
+  -- Cleanup: kill all running REPLs on exit, even if serverLoop throws an exception
+  finally
+    (serverLoop configPath False replsRef)
+    (killAllRepls replsRef)
 
 serverLoop :: FilePath -> Bool -> IORef (Map ReplId ReplHandle) -> IO ()
 serverLoop configPath connected replsRef = do
@@ -496,6 +499,20 @@ executeShellCommand maybeWorkingDir envVarsMap cmd = do
 
     handleException :: SomeException -> IO (Either Text (Text, Text, Int))
     handleException e = return $ Left $ "Failed to execute command: " <> T.pack (show e)
+
+-- Kill all running REPLs (used on shutdown)
+killAllRepls :: IORef (Map ReplId ReplHandle) -> IO ()
+killAllRepls replsRef = do
+  repls <- readIORef replsRef
+  let replIds = Map.keys repls
+  when (not (null replIds)) $ do
+    Text.hPutStrLn IO.stderr $ "Shutting down, killing " <> T.pack (show (length replIds)) <> " REPL(s)..."
+    mapM_ (\replId -> do
+      result <- killRepl replsRef replId
+      case result of
+        Left err -> Text.hPutStrLn IO.stderr $ "Warning: Failed to kill REPL " <> replId <> ": " <> err
+        Right msg -> Text.putStrLn msg
+      ) replIds
 
 -- Kill a REPL process: close stdin, wait, and kill if still running
 killRepl :: IORef (Map ReplId ReplHandle) -> ReplId -> IO (Either Text Text)
