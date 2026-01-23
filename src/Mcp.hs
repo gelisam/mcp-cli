@@ -434,6 +434,25 @@ handleCallTool configPath replsRef config callParams = do
                then toolWd  -- Tool working directory is absolute, use as-is
                else globalResolved </> toolWd  -- Tool working directory is relative to global
 
+-- Helper function to configure process working directory
+configureWorkingDir :: Maybe FilePath -> ProcessConfig stdin stdout stderr -> ProcessConfig stdin stdout stderr
+configureWorkingDir mWorkingDir = case mWorkingDir of
+  Nothing -> Prelude.id
+  Just workingDir -> setWorkingDir workingDir
+
+-- Helper function to configure process environment variables
+configureEnvVars :: Map Text (Maybe Text) -> ProcessConfig stdin stdout stderr -> IO (ProcessConfig stdin stdout stderr)
+configureEnvVars envMap baseConfig = do
+  baseVars <- getEnvironment
+  -- Convert Map to environment variable list, handling unset variables
+  let envVarsList = Map.toList envMap
+      setVars = [(T.unpack k, T.unpack v) | (k, Just v) <- envVarsList]
+      unsetVars = [T.unpack k | (k, Nothing) <- envVarsList]
+      -- Remove unset variables from base environment
+      filteredBaseVars = filter (\(k, _) -> k `notElem` unsetVars) baseVars
+      allVars = setVars ++ filteredBaseVars
+  return $ setEnv allVars baseConfig
+
 -- Execute shell command using typed-process
 executeShellCommand :: Maybe FilePath -> Map Text (Maybe Text) -> Text -> IO (Either Text (Text, Text, Int))
 executeShellCommand maybeWorkingDir envVarsMap cmd = do
@@ -443,28 +462,8 @@ executeShellCommand maybeWorkingDir envVarsMap cmd = do
     tryExecute :: Maybe FilePath -> Map Text (Maybe Text) -> Text -> IO (Either Text (Text, Text, Int))
     tryExecute mWorkingDir envMap command = do
       let baseConfig = shell $ T.unpack command
-
-      let configurePwd :: ProcessConfig stdin stdout stderr
-                       -> ProcessConfig stdin stdout stderr
-          configurePwd = case mWorkingDir of
-            Nothing
-              -> Prelude.id
-            Just workingDir
-              -> setWorkingDir workingDir
-
-      baseVars <- getEnvironment
-      -- Convert Map to environment variable list, handling unset variables
-      let envVarsList = Map.toList envMap
-          setVars = [(T.unpack k, T.unpack v) | (k, Just v) <- envVarsList]
-          unsetVars = [T.unpack k | (k, Nothing) <- envVarsList]
-          -- Remove unset variables from base environment
-          filteredBaseVars = filter (\(k, _) -> k `notElem` unsetVars) baseVars
-          allVars = setVars ++ filteredBaseVars
-      let configureEnv :: ProcessConfig stdin stdout stderr
-                       -> ProcessConfig stdin stdout stderr
-          configureEnv = setEnv allVars
-
-      let processConfig = configureEnv . configurePwd $ baseConfig
+          withWorkingDir = configureWorkingDir mWorkingDir baseConfig
+      processConfig <- configureEnvVars envMap withWorkingDir
       (exitCode, out, err) <- readProcess processConfig
       let exitCodeInt = case exitCode of
             ExitSuccess -> 0
@@ -485,33 +484,12 @@ startRepl replsRef maybeWorkingDir envVarsMap cmd = do
     tryStartRepl :: Maybe FilePath -> Map Text (Maybe Text) -> Text -> IO (Either Text ReplId)
     tryStartRepl mWorkingDir envMap command = do
       let baseConfig = shell $ T.unpack command
-
-      let configurePwd :: ProcessConfig stdin stdout stderr
-                       -> ProcessConfig stdin stdout stderr
-          configurePwd = case mWorkingDir of
-            Nothing
-              -> Prelude.id
-            Just workingDir
-              -> setWorkingDir workingDir
-
-      baseVars <- getEnvironment
-      -- Convert Map to environment variable list, handling unset variables
-      let envVarsList = Map.toList envMap
-          setVars = [(T.unpack k, T.unpack v) | (k, Just v) <- envVarsList]
-          unsetVars = [T.unpack k | (k, Nothing) <- envVarsList]
-          -- Remove unset variables from base environment
-          filteredBaseVars = filter (\(k, _) -> k `notElem` unsetVars) baseVars
-          allVars = setVars ++ filteredBaseVars
-      let configureEnv :: ProcessConfig stdin stdout stderr
-                       -> ProcessConfig stdin stdout stderr
-          configureEnv = setEnv allVars
-
-      -- Create process with stdin, stdout, stderr as handles
+          withWorkingDir = configureWorkingDir mWorkingDir baseConfig
+      withEnvVars <- configureEnvVars envMap withWorkingDir
       let processConfig = setStdin createPipe
                         $ setStdout createPipe
                         $ setStderr createPipe
-                        $ configureEnv
-                        $ configurePwd baseConfig
+                        $ withEnvVars
 
       process <- startProcess processConfig
       let stdinH = getStdin process
