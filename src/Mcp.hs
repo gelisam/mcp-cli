@@ -289,9 +289,14 @@ handleListTools shellCommands = return $
     { toolName = case cmdName cmd of
         Just name -> name
         Nothing -> "execute_command_" <> T.pack (show i)
-    , toolDescription = case cmdDescription cmd of
-        Just desc -> desc
-        Nothing -> "Execute the shell command: " <> cmdCommand cmd
+    , toolDescription =
+        let baseDesc = case cmdDescription cmd of
+              Just desc -> desc
+              Nothing -> "Execute the shell command: " <> cmdCommand cmd
+            replSuffix = if cmdIsRepl cmd
+                          then "\n\nThis is a REPL tool. The output will be an ID of the form `repl-1234` which can be used with the send_to_repl, read_from_repl, and kill_repl commands."
+                          else ""
+        in baseDesc <> replSuffix
     , toolInputSchema = generateInputSchema $ cmdArguments cmd
     }) (zip [1..] shellCommands)
   where
@@ -377,7 +382,7 @@ handleCallTool configPath replsRef config callParams = do
               [ "content" .=
                 [ object
                   [ "type" .= ("text" :: Text)
-                  , "text" .= ("Started REPL with ID: " <> replId)
+                  , "text" .= replId
                   ]
                 ]
               , "isError" .= False
