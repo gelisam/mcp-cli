@@ -310,6 +310,20 @@ handleListTools shellCommands = return $ builtInTools ++ commandTools
           ]
         }
       , McpTool
+        { toolName = "read_from_repl"
+        , toolDescription = "Read everything which the REPL with the given id has outputted since the last read."
+        , toolInputSchema = object
+          [ "type" .= ("object" :: Text)
+          , "properties" .= object
+            [ "repl_id" .= object
+              [ "type" .= ("string" :: Text)
+              , "description" .= ("The ID of the REPL to read from, e.g. \"repl-1234\"" :: Text)
+              ]
+            ]
+          , "required" .= (["repl_id"] :: [Text])
+          ]
+        }
+      , McpTool
         { toolName = "kill_repl"
         , toolDescription = "Close the stdin of a REPL with the given id, wait a few seconds, and then kill it if it is still running."
         , toolInputSchema = object
@@ -367,6 +381,7 @@ handleCallTool configPath replsRef config callParams = do
   -- Check if this is a built-in tool first
   case toolName of
     "send_to_repl" -> handleSendToRepl replsRef callParams
+    "read_from_repl" -> handleReadFromRepl replsRef callParams
     "kill_repl" -> handleKillRepl replsRef callParams
     _ -> do
       -- Try to find command by custom name first
@@ -604,6 +619,70 @@ sendToRepl replsRef replId input = do
 
     handleException :: SomeException -> IO (Either Text ())
     handleException e = return $ Left $ "Failed to send to REPL: " <> T.pack (show e)
+
+-- Handle read_from_repl tool call
+handleReadFromRepl :: IORef (Map ReplId ReplHandle) -> CallToolParams -> IO (Either Text Value)
+handleReadFromRepl replsRef callParams = do
+  case callArguments callParams of
+    Just (Object obj) -> do
+      case KM.lookup "repl_id" obj of
+        Just (String replId) -> do
+          res <- readFromRepl replsRef replId
+          case res of
+            Right output -> return $ Right $ object
+              [ "content" .=
+                [ object
+                  [ "type" .= ("text" :: Text)
+                  , "text" .= output
+                  ]
+                ]
+              , "isError" .= False
+              ]
+            Left err -> return $ Left err
+        _ -> return $ Left "Missing or invalid repl_id"
+    _ -> return $ Left "Missing or invalid arguments"
+
+-- Read all available output from a REPL process
+readFromRepl :: IORef (Map ReplId ReplHandle) -> ReplId -> IO (Either Text Text)
+readFromRepl replsRef replId = do
+  repls <- readIORef replsRef
+  case Map.lookup replId repls of
+    Nothing -> return $ Left $ "Unknown REPL id: " <> replId
+    Just replHandle -> do
+      res <- catch (tryReadFromRepl replHandle) handleException
+      return res
+  where
+    tryReadFromRepl :: ReplHandle -> IO (Either Text Text)
+    tryReadFromRepl replHandle = do
+      -- Read all available output from both stdout and stderr
+      stdoutAvailable <- IO.hReady (replStdout replHandle)
+      stderrAvailable <- IO.hReady (replStderr replHandle)
+
+      stdoutText <- if stdoutAvailable
+        then readAvailable (replStdout replHandle)
+        else return ""
+
+      stderrText <- if stderrAvailable
+        then readAvailable (replStderr replHandle)
+        else return ""
+
+      let output = stdoutText <> stderrText
+      return $ Right output
+
+    readAvailable :: IO.Handle -> IO Text
+    readAvailable handle = do
+      -- Read all available data without blocking
+      let readLoop acc = do
+            ready <- IO.hReady handle
+            if ready
+              then do
+                char <- IO.hGetChar handle
+                readLoop (acc <> T.singleton char)
+              else return acc
+      readLoop ""
+
+    handleException :: SomeException -> IO (Either Text Text)
+    handleException e = return $ Left $ "Failed to read from REPL: " <> T.pack (show e)
 
 -- Handle kill_repl tool call
 handleKillRepl :: IORef (Map ReplId ReplHandle) -> CallToolParams -> IO (Either Text Value)
