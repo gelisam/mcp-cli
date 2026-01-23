@@ -12,7 +12,7 @@ import Data.Aeson.Key (Key, fromText)
 import Data.Aeson.Key (Key, fromText, toText)
 import Data.Aeson.Types (Parser)
 import Data.Map (Map)
-import Data.Maybe (mapMaybe)
+import Data.Maybe (mapMaybe, fromMaybe)
 import Data.Text (Text)
 import GHC.Generics (Generic)
 import Prelude hiding (id)
@@ -49,7 +49,7 @@ data Command = Command
   , cmdWorkingDirectory :: Maybe Text
   , cmdArguments :: Maybe [Argument]
   , cmdEnvVars :: Maybe (Map Text (Maybe Text))
-  , cmdIsRepl :: Maybe Bool
+  , cmdIsRepl :: Bool
   }
   deriving (Generic, Show)
 
@@ -100,11 +100,12 @@ parseCommand = do
       workingDir <- ABE.keyMay "workingDirectory" ABE.asText
       arguments <- ABE.keyMay "arguments" $ ABE.eachInArray parseArgument
       envVarsMap <- ABE.keyMay "envVars" parseEnvVars
-      isRepl <- ABE.keyMay "repl" ABE.asBool
+      isReplMay <- ABE.keyMay "repl" ABE.asBool
+      let isRepl = fromMaybe False isReplMay
       pure $ Command cmd name description workingDir arguments envVarsMap isRepl
     ABE.TyString -> do
       cmd <- ABE.asText
-      pure $ Command cmd Nothing Nothing Nothing Nothing Nothing Nothing
+      pure $ Command cmd Nothing Nothing Nothing Nothing Nothing False
     _ -> do
       ABE.throwCustomError ("Expected object or string, got: " <> T.pack (show tp))
 
