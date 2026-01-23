@@ -7,6 +7,7 @@ import Control.Applicative ((<|>))
 import Control.Exception (catch, SomeException)
 import Control.Monad (when)
 import Data.Aeson
+import Data.IORef
 import Data.Aeson.BetterErrors (Parse)
 import Data.Aeson.Key (Key, fromText)
 import Data.Aeson.Key (Key, fromText, toText)
@@ -140,6 +141,16 @@ data JsonRpcError = JsonRpcError
   }
   deriving (Generic, Show)
 
+-- REPL management data types
+type ReplId = Text
+
+data ReplHandle = ReplHandle
+  { replProcess :: Process IO.Handle IO.Handle IO.Handle
+  , replStdin :: IO.Handle
+  , replStdout :: IO.Handle
+  , replStderr :: IO.Handle
+  }
+
 -- MCP-specific data types
 data McpTool = McpTool
   { toolName :: Text
@@ -197,10 +208,11 @@ mcpServer :: FilePath -> IO ()
 mcpServer configPath = do
   Text.hPutStrLn IO.stderr "Waiting for connection..."
   hFlush IO.stderr
-  serverLoop configPath False
+  replsRef <- newIORef Map.empty
+  serverLoop configPath False replsRef
 
-serverLoop :: FilePath -> Bool -> IO ()
-serverLoop configPath connected = do
+serverLoop :: FilePath -> Bool -> IORef (Map ReplId ReplHandle) -> IO ()
+serverLoop configPath connected replsRef = do
   eof <- hIsEOF IO.stdin
   if eof
     then do
@@ -210,7 +222,7 @@ serverLoop configPath connected = do
       case decode $ LazyByteString.fromStrict $ Text.encodeUtf8 line of
         Nothing -> do
           Text.hPutStrLn IO.stderr $ "Invalid JSON: " <> line
-          serverLoop configPath connected
+          serverLoop configPath connected replsRef
         Just req -> do
           let newConnected = if method req == "initialize" && not connected
                             then True
@@ -218,15 +230,15 @@ serverLoop configPath connected = do
           when (newConnected && not connected) $
             Text.hPutStrLn IO.stderr "Connected to VS Code."
 
-          response <- handleRequest configPath req
+          response <- handleRequest configPath replsRef req
           LazyByteString.putStr $ encodeWithUnicodeEscapes response
           Text.putStrLn ""
           hFlush IO.stdout
-          serverLoop configPath newConnected
+          serverLoop configPath newConnected replsRef
 
 -- Handle incoming JSON-RPC requests
-handleRequest :: FilePath -> JsonRpcRequest -> IO JsonRpcResponse
-handleRequest configPath req = do
+handleRequest :: FilePath -> IORef (Map ReplId ReplHandle) -> JsonRpcRequest -> IO JsonRpcResponse
+handleRequest configPath replsRef req = do
   let requestId = id req
   case method req of
     "initialize" -> return $ JsonRpcResponse "2.0" (Just $ handleInitialize $ params req) Nothing requestId
@@ -248,7 +260,7 @@ handleRequest configPath req = do
         Right config -> do
           res <- case params req of
             Just p -> case fromJSON p of
-              Success callParams -> handleCallTool configPath config callParams
+              Success callParams -> handleCallTool configPath replsRef config callParams
               Error err -> return $ Left $ "Invalid parameters: " <> T.pack err
             Nothing -> return $ Left "Missing parameters"
           case res of
@@ -304,8 +316,8 @@ handleListTools shellCommands = return $
           ]
       )
 
-handleCallTool :: FilePath -> CommandConfig -> CallToolParams -> IO (Either Text Value)
-handleCallTool configPath config callParams = do
+handleCallTool :: FilePath -> IORef (Map ReplId ReplHandle) -> CommandConfig -> CallToolParams -> IO (Either Text Value)
+handleCallTool configPath replsRef config callParams = do
   let toolName = callToolName callParams
       shellCommands = commands config
   -- Try to find command by custom name first
@@ -356,18 +368,34 @@ handleCallTool configPath config callParams = do
               Just globalWd -> Just $ resolveWorkingDirectory configPath (T.unpack globalWd)
             Just toolWd -> Just $ resolveToolWorkingDirectory configPath (workingDirectory config) (T.unpack toolWd)
 
-      res <- executeShellCommand workingDir mergedEnvVars command
-      case res of
-        Right (out, err, exitCode) -> return $ Right $ object
-          [ "content" .=
-            [ object
-              [ "type" .= ("text" :: Text)
-              , "text" .= (out <> if T.null err then "" else "\nSTDERR:\n" <> err)
+      -- Handle REPL tools differently
+      if cmdIsRepl cmd
+        then do
+          res <- startRepl replsRef workingDir mergedEnvVars command
+          case res of
+            Right replId -> return $ Right $ object
+              [ "content" .=
+                [ object
+                  [ "type" .= ("text" :: Text)
+                  , "text" .= ("Started REPL with ID: " <> replId)
+                  ]
+                ]
+              , "isError" .= False
               ]
-            ]
-          , "isError" .= (exitCode /= 0)
-          ]
-        Left e -> return $ Left e
+            Left e -> return $ Left e
+        else do
+          res <- executeShellCommand workingDir mergedEnvVars command
+          case res of
+            Right (out, err, exitCode) -> return $ Right $ object
+              [ "content" .=
+                [ object
+                  [ "type" .= ("text" :: Text)
+                  , "text" .= (out <> if T.null err then "" else "\nSTDERR:\n" <> err)
+                  ]
+                ]
+              , "isError" .= (exitCode /= 0)
+              ]
+            Left e -> return $ Left e
 
     -- Helper function to extract environment variables from call arguments
     extractEnvVars :: Maybe [Argument] -> Value -> [(Text, Text)]
@@ -442,6 +470,71 @@ executeShellCommand maybeWorkingDir envVarsMap cmd = do
 
     handleException :: SomeException -> IO (Either Text (Text, Text, Int))
     handleException e = return $ Left $ "Failed to execute command: " <> T.pack (show e)
+
+-- Start a REPL process and return its ID
+startRepl :: IORef (Map ReplId ReplHandle) -> Maybe FilePath -> Map Text (Maybe Text) -> Text -> IO (Either Text ReplId)
+startRepl replsRef maybeWorkingDir envVarsMap cmd = do
+  res <- catch (tryStartRepl maybeWorkingDir envVarsMap cmd) handleException
+  return res
+  where
+    tryStartRepl :: Maybe FilePath -> Map Text (Maybe Text) -> Text -> IO (Either Text ReplId)
+    tryStartRepl mWorkingDir envMap command = do
+      let baseConfig = shell $ T.unpack command
+
+      let configurePwd :: ProcessConfig stdin stdout stderr
+                       -> ProcessConfig stdin stdout stderr
+          configurePwd = case mWorkingDir of
+            Nothing
+              -> Prelude.id
+            Just workingDir
+              -> setWorkingDir workingDir
+
+      baseVars <- getEnvironment
+      -- Convert Map to environment variable list, handling unset variables
+      let envVarsList = Map.toList envMap
+          setVars = [(T.unpack k, T.unpack v) | (k, Just v) <- envVarsList]
+          unsetVars = [T.unpack k | (k, Nothing) <- envVarsList]
+          -- Remove unset variables from base environment
+          filteredBaseVars = filter (\(k, _) -> k `notElem` unsetVars) baseVars
+          allVars = setVars ++ filteredBaseVars
+      let configureEnv :: ProcessConfig stdin stdout stderr
+                       -> ProcessConfig stdin stdout stderr
+          configureEnv = setEnv allVars
+
+      -- Create process with stdin, stdout, stderr as handles
+      let processConfig = setStdin createPipe
+                        $ setStdout createPipe
+                        $ setStderr createPipe
+                        $ configureEnv
+                        $ configurePwd baseConfig
+
+      process <- startProcess processConfig
+      let stdinH = getStdin process
+          stdoutH = getStdout process
+          stderrH = getStderr process
+
+      -- Set non-blocking mode for stdout and stderr
+      IO.hSetBuffering stdinH IO.LineBuffering
+      IO.hSetBuffering stdoutH IO.NoBuffering
+      IO.hSetBuffering stderrH IO.NoBuffering
+
+      -- Generate unique REPL ID
+      repls <- readIORef replsRef
+      let replId = "repl-" <> T.pack (show (Map.size repls + 1))
+
+      -- Store REPL handle
+      let replHandle = ReplHandle
+            { replProcess = process
+            , replStdin = stdinH
+            , replStdout = stdoutH
+            , replStderr = stderrH
+            }
+      modifyIORef replsRef $ Map.insert replId replHandle
+
+      return $ Right replId
+
+    handleException :: SomeException -> IO (Either Text ReplId)
+    handleException e = return $ Left $ "Failed to start REPL: " <> T.pack (show e)
 
 -- Load configuration from JSON file
 loadConfig :: FilePath -> IO (Either Text CommandConfig)
