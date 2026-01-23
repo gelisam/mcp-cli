@@ -4,6 +4,7 @@
 module Mcp where
 
 import Control.Applicative ((<|>))
+import Control.Concurrent (threadDelay)
 import Control.Exception (catch, SomeException)
 import Control.Monad (when)
 import Data.Aeson
@@ -284,22 +285,39 @@ handleInitialize _ = object
   ]
 
 handleListTools :: [Command] -> IO [McpTool]
-handleListTools shellCommands = return $
-  map (\(i, cmd) -> McpTool
-    { toolName = case cmdName cmd of
-        Just name -> name
-        Nothing -> "execute_command_" <> T.pack (show i)
-    , toolDescription =
-        let baseDesc = case cmdDescription cmd of
-              Just desc -> desc
-              Nothing -> "Execute the shell command: " <> cmdCommand cmd
-            replSuffix = if cmdIsRepl cmd
-                          then "\n\nThis is a REPL tool. The output will be an ID of the form `repl-1234` which can be used with the send_to_repl, read_from_repl, and kill_repl commands."
-                          else ""
-        in baseDesc <> replSuffix
-    , toolInputSchema = generateInputSchema $ cmdArguments cmd
-    }) (zip [1..] shellCommands)
+handleListTools shellCommands = return $ builtInTools ++ commandTools
   where
+    builtInTools =
+      [ McpTool
+        { toolName = "kill_repl"
+        , toolDescription = "Close the stdin of a REPL with the given id, wait a few seconds, and then kill it if it is still running."
+        , toolInputSchema = object
+          [ "type" .= ("object" :: Text)
+          , "properties" .= object
+            [ "repl_id" .= object
+              [ "type" .= ("string" :: Text)
+              , "description" .= ("The ID of the REPL to kill, e.g. \"repl-1234\"" :: Text)
+              ]
+            ]
+          , "required" .= (["repl_id"] :: [Text])
+          ]
+        }
+      ]
+    commandTools = map (\(i, cmd) -> McpTool
+      { toolName = case cmdName cmd of
+          Just name -> name
+          Nothing -> "execute_command_" <> T.pack (show i)
+      , toolDescription =
+          let baseDesc = case cmdDescription cmd of
+                Just desc -> desc
+                Nothing -> "Execute the shell command: " <> cmdCommand cmd
+              replSuffix = if cmdIsRepl cmd
+                            then "\n\nThis is a REPL tool. The output will be an ID of the form `repl-1234` which can be used with the send_to_repl, read_from_repl, and kill_repl commands."
+                            else ""
+          in baseDesc <> replSuffix
+      , toolInputSchema = generateInputSchema $ cmdArguments cmd
+      }) (zip [1..] shellCommands)
+
     generateInputSchema :: Maybe [Argument] -> Value
     generateInputSchema Nothing = object
       [ "type" .= ("object" :: Text)
@@ -325,22 +343,26 @@ handleCallTool :: FilePath -> IORef (Map ReplId ReplHandle) -> CommandConfig -> 
 handleCallTool configPath replsRef config callParams = do
   let toolName = callToolName callParams
       shellCommands = commands config
-  -- Try to find command by custom name first
-  case findCommandByName toolName shellCommands of
-    Just cmd -> executeAndRespond cmd
-    Nothing ->
-      -- Fall back to the old execute_command_N format
-      case T.stripPrefix "execute_command_" toolName of
-        Just indexText ->
-          case reads (T.unpack indexText) of
-            [(index, "")] ->
-              if index >= 1 && index <= length shellCommands
-                then do
-                  let cmd = shellCommands !! (index - 1)
-                  executeAndRespond cmd
-                else return $ Left $ "Invalid command index: " <> T.pack (show index)
-            _ -> return $ Left $ "Invalid tool name format: " <> toolName
-        Nothing -> return $ Left $ "Unknown tool: " <> toolName
+  -- Check if this is a built-in tool first
+  case toolName of
+    "kill_repl" -> handleKillRepl replsRef callParams
+    _ -> do
+      -- Try to find command by custom name first
+      case findCommandByName toolName shellCommands of
+        Just cmd -> executeAndRespond cmd
+        Nothing ->
+          -- Fall back to the old execute_command_N format
+          case T.stripPrefix "execute_command_" toolName of
+            Just indexText ->
+              case reads (T.unpack indexText) of
+                [(index, "")] ->
+                  if index >= 1 && index <= length shellCommands
+                    then do
+                      let cmd = shellCommands !! (index - 1)
+                      executeAndRespond cmd
+                    else return $ Left $ "Invalid command index: " <> T.pack (show index)
+                _ -> return $ Left $ "Invalid tool name format: " <> toolName
+            Nothing -> return $ Left $ "Unknown tool: " <> toolName
   where
     findCommandByName :: Text -> [Command] -> Maybe Command
     findCommandByName name cmds =
@@ -474,6 +496,63 @@ executeShellCommand maybeWorkingDir envVarsMap cmd = do
 
     handleException :: SomeException -> IO (Either Text (Text, Text, Int))
     handleException e = return $ Left $ "Failed to execute command: " <> T.pack (show e)
+
+-- Kill a REPL process: close stdin, wait, and kill if still running
+killRepl :: IORef (Map ReplId ReplHandle) -> ReplId -> IO (Either Text Text)
+killRepl replsRef replId = do
+  repls <- readIORef replsRef
+  case Map.lookup replId repls of
+    Nothing -> return $ Left $ "Unknown REPL id: " <> replId
+    Just replHandle -> do
+      res <- catch (tryKillRepl replHandle) handleException
+      -- Remove from map regardless of success
+      modifyIORef replsRef $ Map.delete replId
+      return res
+  where
+    tryKillRepl :: ReplHandle -> IO (Either Text Text)
+    tryKillRepl replHandle = do
+      -- Close stdin
+      IO.hClose (replStdin replHandle)
+
+      -- Wait 3 seconds (3000000 microseconds)
+      threadDelay 3000000
+
+      -- Check if process is still running and kill it
+      let process = replProcess replHandle
+      maybeExitCode <- getExitCode process
+      case maybeExitCode of
+        Just _ ->
+          -- Process already exited
+          return $ Right $ "REPL " <> replId <> " has been stopped"
+        Nothing -> do
+          -- Process still running, need to kill it
+          stopProcess process
+          return $ Right $ "REPL " <> replId <> " has been killed"
+
+    handleException :: SomeException -> IO (Either Text Text)
+    handleException e = return $ Left $ "Failed to kill REPL: " <> T.pack (show e)
+
+-- Handle kill_repl tool call
+handleKillRepl :: IORef (Map ReplId ReplHandle) -> CallToolParams -> IO (Either Text Value)
+handleKillRepl replsRef callParams = do
+  case callArguments callParams of
+    Just (Object obj) -> do
+      case KM.lookup "repl_id" obj of
+        Just (String replId) -> do
+          res <- killRepl replsRef replId
+          case res of
+            Right msg -> return $ Right $ object
+              [ "content" .=
+                [ object
+                  [ "type" .= ("text" :: Text)
+                  , "text" .= msg
+                  ]
+                ]
+              , "isError" .= False
+              ]
+            Left err -> return $ Left err
+        _ -> return $ Left "repl_id must be a string"
+    _ -> return $ Left "Missing or invalid arguments"
 
 -- Start a REPL process and return its ID
 startRepl :: IORef (Map ReplId ReplHandle) -> Maybe FilePath -> Map Text (Maybe Text) -> Text -> IO (Either Text ReplId)
