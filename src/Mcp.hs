@@ -49,6 +49,7 @@ data Command = Command
   , cmdWorkingDirectory :: Maybe Text
   , cmdArguments :: Maybe [Argument]
   , cmdEnvVars :: Maybe (Map Text (Maybe Text))
+  , cmdIsRepl :: Maybe Bool
   }
   deriving (Generic, Show)
 
@@ -99,10 +100,11 @@ parseCommand = do
       workingDir <- ABE.keyMay "workingDirectory" ABE.asText
       arguments <- ABE.keyMay "arguments" $ ABE.eachInArray parseArgument
       envVarsMap <- ABE.keyMay "envVars" parseEnvVars
-      pure $ Command cmd name description workingDir arguments envVarsMap
+      isRepl <- ABE.keyMay "repl" ABE.asBool
+      pure $ Command cmd name description workingDir arguments envVarsMap isRepl
     ABE.TyString -> do
       cmd <- ABE.asText
-      pure $ Command cmd Nothing Nothing Nothing Nothing Nothing
+      pure $ Command cmd Nothing Nothing Nothing Nothing Nothing Nothing
     _ -> do
       ABE.throwCustomError ("Expected object or string, got: " <> T.pack (show tp))
 
