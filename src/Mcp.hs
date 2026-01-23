@@ -292,6 +292,24 @@ handleListTools shellCommands = return $ builtInTools ++ commandTools
   where
     builtInTools =
       [ McpTool
+        { toolName = "send_to_repl"
+        , toolDescription = "Send a line of input to the REPL with the given id."
+        , toolInputSchema = object
+          [ "type" .= ("object" :: Text)
+          , "properties" .= object
+            [ "repl_id" .= object
+              [ "type" .= ("string" :: Text)
+              , "description" .= ("The ID of the REPL to send input to, e.g. \"repl-1234\"" :: Text)
+              ]
+            , "input" .= object
+              [ "type" .= ("string" :: Text)
+              , "description" .= ("The line of input to send to the REPL" :: Text)
+              ]
+            ]
+          , "required" .= (["repl_id", "input"] :: [Text])
+          ]
+        }
+      , McpTool
         { toolName = "kill_repl"
         , toolDescription = "Close the stdin of a REPL with the given id, wait a few seconds, and then kill it if it is still running."
         , toolInputSchema = object
@@ -348,6 +366,7 @@ handleCallTool configPath replsRef config callParams = do
       shellCommands = commands config
   -- Check if this is a built-in tool first
   case toolName of
+    "send_to_repl" -> handleSendToRepl replsRef callParams
     "kill_repl" -> handleKillRepl replsRef callParams
     _ -> do
       -- Try to find command by custom name first
@@ -548,6 +567,43 @@ killRepl replsRef replId = do
 
     handleException :: SomeException -> IO (Either Text Text)
     handleException e = return $ Left $ "Failed to kill REPL: " <> T.pack (show e)
+
+-- Handle send_to_repl tool call
+handleSendToRepl :: IORef (Map ReplId ReplHandle) -> CallToolParams -> IO (Either Text Value)
+handleSendToRepl replsRef callParams = do
+  case callArguments callParams of
+    Just (Object obj) -> do
+      case (KM.lookup "repl_id" obj, KM.lookup "input" obj) of
+        (Just (String replId), Just (String input)) -> do
+          res <- sendToRepl replsRef replId input
+          case res of
+            Right () -> return $ Right $ object
+              [ "content" .= ([] :: [Value])
+              , "isError" .= False
+              ]
+            Left err -> return $ Left err
+        _ -> return $ Left "Missing or invalid repl_id or input"
+    _ -> return $ Left "Missing or invalid arguments"
+
+-- Send a line of input to a REPL process
+sendToRepl :: IORef (Map ReplId ReplHandle) -> ReplId -> Text -> IO (Either Text ())
+sendToRepl replsRef replId input = do
+  repls <- readIORef replsRef
+  case Map.lookup replId repls of
+    Nothing -> return $ Left $ "Unknown REPL id: " <> replId
+    Just replHandle -> do
+      res <- catch (trySendToRepl replHandle) handleException
+      return res
+  where
+    trySendToRepl :: ReplHandle -> IO (Either Text ())
+    trySendToRepl replHandle = do
+      -- Write the input line to the REPL's stdin
+      Text.hPutStrLn (replStdin replHandle) input
+      IO.hFlush (replStdin replHandle)
+      return $ Right ()
+
+    handleException :: SomeException -> IO (Either Text ())
+    handleException e = return $ Left $ "Failed to send to REPL: " <> T.pack (show e)
 
 -- Handle kill_repl tool call
 handleKillRepl :: IORef (Map ReplId ReplHandle) -> CallToolParams -> IO (Either Text Value)
